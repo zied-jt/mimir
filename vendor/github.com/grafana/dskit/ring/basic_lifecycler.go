@@ -372,11 +372,15 @@ func (l *BasicLifecycler) unregisterInstance(ctx context.Context) error {
 	level.Info(l.logger).Log("msg", "unregistering instance from ring", "ring", l.ringName)
 
 	err := l.store.CAS(ctx, l.ringKey, func(in interface{}) (out interface{}, retry bool, err error) {
+
 		if in == nil {
 			return nil, false, fmt.Errorf("found empty ring when trying to unregister")
 		}
 
 		ringDesc := in.(*Desc)
+		_, exists := ringDesc.Ingesters[l.cfg.ID]
+		level.Info(l.logger).Log("msg", "unregistering instance from ring - CAS()", "ring", l.ringName, "instance is in the ring", exists)
+
 		ringDesc.RemoveIngester(l.cfg.ID)
 		return ringDesc, true, nil
 	})
