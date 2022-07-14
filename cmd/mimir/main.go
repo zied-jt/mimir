@@ -210,6 +210,10 @@ func main() {
 
 	err = t.Run()
 
+	level.Info(util_log.Logger).Log("msg", "sleeping before shutdown")
+	time.Sleep(20 * time.Second)
+	level.Info(util_log.Logger).Log("msg", "sleep before shutdown done")
+
 	runtime.KeepAlive(ballast)
 	util_log.CheckFatal("running application", err)
 }

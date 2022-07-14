@@ -626,6 +626,9 @@ func (m *KV) stopping(_ error) error {
 	if err != nil {
 		level.Error(m.logger).Log("msg", "error when shutting down memberlist client", "err", err)
 	}
+	level.Info(m.logger).Log("msg", "memberlist final sleep")
+	time.Sleep(20 * time.Second)
+	level.Info(m.logger).Log("msg", "memberlist final sleep done")
 	return nil
 }
 
