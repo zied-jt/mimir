@@ -1043,6 +1043,8 @@ func (m *KV) processValueUpdate(workerCh <-chan valueUpdate, key string) {
 }
 
 func (m *KV) queueBroadcast(key string, content []string, version uint, message []byte) {
+	level.Debug(m.logger).Log("msg", "message added to the queue", "key", key, "content", fmt.Sprintf("%v", content), "version", version)
+
 	l := len(message)
 
 	b := ringBroadcast{
