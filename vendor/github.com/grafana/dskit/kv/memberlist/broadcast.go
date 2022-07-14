@@ -19,38 +19,37 @@ type ringBroadcast struct {
 }
 
 func (r ringBroadcast) Invalidates(old memberlist.Broadcast) bool {
+	if oldb, ok := old.(ringBroadcast); ok {
+		if r.key != oldb.key {
+			return false
+		}
+
+		// if 'content' (result of Mergeable.MergeContent) of this broadcast is a superset of content of old value,
+		// and this broadcast has resulted in a newer ring update, we can invalidate the old value
+
+		for _, oldName := range oldb.content {
+			found := false
+			for _, newName := range r.content {
+				if oldName == newName {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				return false
+			}
+		}
+
+		// only do this check if this ringBroadcast covers same ingesters as 'b'
+		// otherwise, we may be invalidating some older messages, which however covered different
+		// ingesters
+		if r.version >= oldb.version {
+			level.Debug(r.logger).Log("msg", "Invalidating forwarded broadcast", "key", r.key, "version", r.version, "oldVersion", oldb.version, "content", fmt.Sprintf("%v", r.content), "oldContent", fmt.Sprintf("%v", oldb.content))
+			return true
+		}
+	}
 	return false
-	//if oldb, ok := old.(ringBroadcast); ok {
-	//	if r.key != oldb.key {
-	//		return false
-	//	}
-	//
-	//	// if 'content' (result of Mergeable.MergeContent) of this broadcast is a superset of content of old value,
-	//	// and this broadcast has resulted in a newer ring update, we can invalidate the old value
-	//
-	//	for _, oldName := range oldb.content {
-	//		found := false
-	//		for _, newName := range r.content {
-	//			if oldName == newName {
-	//				found = true
-	//				break
-	//			}
-	//		}
-	//
-	//		if !found {
-	//			return false
-	//		}
-	//	}
-	//
-	//	// only do this check if this ringBroadcast covers same ingesters as 'b'
-	//	// otherwise, we may be invalidating some older messages, which however covered different
-	//	// ingesters
-	//	if r.version >= oldb.version {
-	//		level.Debug(r.logger).Log("msg", "Invalidating forwarded broadcast", "key", r.key, "version", r.version, "oldVersion", oldb.version, "content", fmt.Sprintf("%v", r.content), "oldContent", fmt.Sprintf("%v", oldb.content))
-	//		return true
-	//	}
-	//}
-	//return false
 }
 
 func (r ringBroadcast) Message() []byte {
