@@ -57,7 +57,7 @@ func (r ringBroadcast) Message() []byte {
 }
 
 func (r ringBroadcast) Finished() {
-	level.Debug(r.logger).Log("msg", "message removed from the queue", "key", r.key, "content", fmt.Sprintf("%v", r.content))
+	level.Debug(r.logger).Log("msg", "message removed from the queue", "key", r.key, "content", fmt.Sprintf("%v", r.content), "version", r.version)
 	if r.finished != nil {
 		r.finished(r)
 	}
