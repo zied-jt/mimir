@@ -249,11 +249,11 @@ func (q *TransmitLimitedQueue) deleteItem(cur *limitedBroadcast) {
 		delete(q.tm, cur.name)
 	}
 
-	if q.tq.Len() == 0 {
-		// At idle there's no reason to let the id generator keep going
-		// indefinitely.
-		q.idGen = 0
-	}
+	//if q.tq.Len() == 0 {
+	//	// At idle there's no reason to let the id generator keep going
+	//	// indefinitely.
+	//	q.idGen = 0
+	//}
 }
 
 // addItem adds the given item into the overall datastructure. You must already
