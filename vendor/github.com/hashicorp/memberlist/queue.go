@@ -1,6 +1,7 @@
 package memberlist
 
 import (
+	"fmt"
 	"math"
 	"sync"
 
@@ -259,7 +260,8 @@ func (q *TransmitLimitedQueue) deleteItem(cur *limitedBroadcast) {
 // addItem adds the given item into the overall datastructure. You must already
 // hold the mutex.
 func (q *TransmitLimitedQueue) addItem(cur *limitedBroadcast) {
-	_ = q.tq.ReplaceOrInsert(cur)
+	oldItem := q.tq.ReplaceOrInsert(cur)
+	fmt.Println("TransmitLimitedQueue.addItem() id:", cur.id, "oldItem:", oldItem)
 	if cur.name != "" {
 		q.tm[cur.name] = cur
 	}
