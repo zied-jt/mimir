@@ -695,6 +695,22 @@ func (b byLabels) Less(i, j int) bool {
 	) < 0
 }
 
+func TestQuerySharding_TerribleQuery(t *testing.T) {
+	query := "clamp_max(1 + (year() == 2022 and ((month() == 1 and ((day_of_month() == 2 and hour() >= 15) or (day_of_month() == 3 and hour() < 15))) or (month() == 1 and ((day_of_month() == 9 and hour() >= 15) or (day_of_month() == 10 and hour() < 15))) or (month() == 2 and ((day_of_month() == 10 and hour() >= 15) or (day_of_month() == 11 and hour() < 15))) or (month() == 2 and ((day_of_month() == 22 and hour() >= 15) or (day_of_month() == 23 and hour() < 15))) or (month() == 3 and ((day_of_month() == 20 and hour() >= 15) or (day_of_month() == 21 and hour() < 15))) or (month() == 4 and ((day_of_month() == 28 and hour() >= 15) or (day_of_month() == 29 and hour() < 15))) or (month() == 5 and ((day_of_month() == 2 and hour() >= 15) or day_of_month() == 3 or day_of_month() == 4 or (day_of_month() == 5 and hour() < 15))) or (month() == 7 and ((day_of_month() == 17 and hour() >= 15) or (day_of_month() == 18 and hour() < 15))) or (month() == 8 and ((day_of_month() == 10 and hour() >= 15) or (day_of_month() == 11 and hour() < 15))) or (month() == 9 and ((day_of_month() == 18 and hour() >= 15) or (day_of_month() == 19 and hour() < 15))) or (month() == 9 and ((day_of_month() == 22 and hour() >= 15) or (day_of_month() == 23 and hour() < 15))) or (month() == 10 and ((day_of_month() == 9 and hour() >= 15) or (day_of_month() == 10 and hour() < 15))) or (month() == 11 and ((day_of_month() == 2 and hour() >= 15) or (day_of_month() == 3 and hour() < 15))) or (month() == 11 and ((day_of_month() == 22 and hour() >= 15) or (day_of_month() == 23 and hour() < 15))) or (month() == 12 and ((day_of_month() == 30 and hour() >= 15) or (day_of_month() == 31 and hour() < 15))))), 1)"
+
+	logger := log.NewNopLogger()
+	engine := promql.NewEngine(promql.EngineOpts{})
+	limits := mockLimits{totalShards: 8}
+
+	qs := &querySharding{
+		logger: logger,
+		engine: engine,
+		limit:  limits,
+	}
+	_, _, err := qs.shardQuery(query, 8)
+	require.NoError(t, err)
+}
+
 func TestQueryshardingDeterminism(t *testing.T) {
 	const shards = 16
 
