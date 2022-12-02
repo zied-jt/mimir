@@ -23,7 +23,6 @@ import (
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
-	"github.com/thanos-io/thanos/pkg/extprom"
 	"github.com/uber/jaeger-client-go"
 
 	"github.com/grafana/mimir/pkg/cache"
@@ -85,7 +84,7 @@ func errUnsupportedResultsCacheBackend(unsupportedBackend string) error {
 func newResultsCache(cfg ResultsCacheConfig, logger log.Logger, reg prometheus.Registerer) (cache.Cache, error) {
 	// Add the "component" label similarly to other components, so that metrics don't clash and have the same labels set
 	// when running in monolithic mode.
-	reg = extprom.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, reg)
+	reg = prometheus.WrapRegistererWith(prometheus.Labels{"component": "query-frontend"}, reg)
 
 	client, err := cache.CreateClient("frontend-cache", cfg.BackendConfig, logger, reg)
 	if err != nil {
@@ -147,14 +146,14 @@ func (PrometheusResponseExtractor) ResponseWithoutHeaders(resp Response) Respons
 // CacheSplitter generates cache keys. This is a useful interface for downstream
 // consumers who wish to implement their own strategies.
 type CacheSplitter interface {
-	GenerateCacheKey(userID string, r Request) string
+	GenerateCacheKey(ctx context.Context, userID string, r Request) string
 }
 
-// constSplitter is a utility for using a constant split interval when determining cache keys
-type constSplitter time.Duration
+// ConstSplitter is a utility for using a constant split interval when determining cache keys
+type ConstSplitter time.Duration
 
 // GenerateCacheKey generates a cache key based on the userID, Request and interval.
-func (t constSplitter) GenerateCacheKey(userID string, r Request) string {
+func (t ConstSplitter) GenerateCacheKey(_ context.Context, userID string, r Request) string {
 	startInterval := r.GetStart() / time.Duration(t).Milliseconds()
 	stepOffset := r.GetStart() % r.GetStep()
 
@@ -174,23 +173,23 @@ type shouldCacheFn func(r Request) bool
 var resultsCacheAlwaysEnabled = func(_ Request) bool { return true }
 
 // isRequestCachable says whether the request is eligible for caching.
-func isRequestCachable(req Request, maxCacheTime int64, cacheUnalignedRequests bool, logger log.Logger) bool {
+func isRequestCachable(req Request, maxCacheTime int64, cacheUnalignedRequests bool, logger log.Logger) (cachable bool, reason string) {
 	// We can run with step alignment disabled because Grafana does it already. Mimir automatically aligning start and end is not
 	// PromQL compatible. But this means we cannot cache queries that do not have their start and end aligned.
 	if !cacheUnalignedRequests && !isRequestStepAligned(req) {
-		return false
+		return false, notCachableReasonUnalignedTimeRange
 	}
 
 	// Do not cache it at all if the query time range is more recent than the configured max cache freshness.
 	if req.GetStart() > maxCacheTime {
-		return false
+		return false, notCachableReasonTooNew
 	}
 
-	if !isAtModifierCachable(req, maxCacheTime, logger) {
-		return false
+	if !areEvaluationTimeModifiersCachable(req, maxCacheTime, logger) {
+		return false, notCachableReasonModifiersNotCachable
 	}
 
-	return true
+	return true, ""
 }
 
 // isResponseCachable says whether the response should be cached or not.
@@ -206,19 +205,22 @@ func isResponseCachable(r Response, logger log.Logger) bool {
 	return true
 }
 
-var errAtModifierAfterEnd = errors.New("at modifier after end")
+var (
+	errAtModifierAfterEnd = errors.New("at modifier after end")
+	errNegativeOffset     = errors.New("negative offset")
+)
 
-// isAtModifierCachable returns true if the @ modifier result
-// is safe to cache.
-func isAtModifierCachable(r Request, maxCacheTime int64, logger log.Logger) bool {
-	// There are 2 cases when @ modifier is not safe to cache:
+// areEvaluationTimeModifiersCachable returns true if the @ modifier and the offset modifier results are safe to cache.
+func areEvaluationTimeModifiersCachable(r Request, maxCacheTime int64, logger log.Logger) bool {
+	// There are 3 cases when evaluation time modifiers are not safe to cache:
 	//   1. When @ modifier points to time beyond the maxCacheTime.
 	//   2. If the @ modifier time is > the query range end while being
 	//      below maxCacheTime. In such cases if any tenant is intentionally
 	//      playing with old data, we could cache empty result if we look
 	//      beyond query end.
+	//   3. When query contains a negative offset.
 	query := r.GetQuery()
-	if !strings.Contains(query, "@") {
+	if !strings.Contains(query, "@") && !strings.Contains(query, "offset") {
 		return true
 	}
 	expr, err := parser.ParseExpr(query)
@@ -232,30 +234,30 @@ func isAtModifierCachable(r Request, maxCacheTime int64, logger log.Logger) bool
 	expr = promql.PreprocessExpr(expr, timestamp.Time(r.GetStart()), timestamp.Time(r.GetEnd()))
 
 	end := r.GetEnd()
-	atModCachable := true
+	cachable := true
+	check := func(ts *int64, offset time.Duration) error {
+		if offset < 0 {
+			cachable = false
+			return errNegativeOffset
+		}
+		if ts != nil && (*ts > end || *ts > maxCacheTime) {
+			cachable = false
+			return errAtModifierAfterEnd
+		}
+		return nil
+	}
+
 	parser.Inspect(expr, func(n parser.Node, _ []parser.Node) error {
 		switch e := n.(type) {
 		case *parser.VectorSelector:
-			if e.Timestamp != nil && (*e.Timestamp > end || *e.Timestamp > maxCacheTime) {
-				atModCachable = false
-				return errAtModifierAfterEnd
-			}
-		case *parser.MatrixSelector:
-			ts := e.VectorSelector.(*parser.VectorSelector).Timestamp
-			if ts != nil && (*ts > end || *ts > maxCacheTime) {
-				atModCachable = false
-				return errAtModifierAfterEnd
-			}
+			return check(e.Timestamp, e.OriginalOffset)
 		case *parser.SubqueryExpr:
-			if e.Timestamp != nil && (*e.Timestamp > end || *e.Timestamp > maxCacheTime) {
-				atModCachable = false
-				return errAtModifierAfterEnd
-			}
+			return check(e.Timestamp, e.OriginalOffset)
 		}
 		return nil
 	})
 
-	return atModCachable
+	return cachable
 }
 
 func getHeaderValuesWithName(r Response, headerName string) (headerValues []string) {
@@ -312,7 +314,6 @@ func mergeCacheExtentsForRequest(ctx context.Context, r Request, merger Merger, 
 		if accumulator.End >= extents[i].End {
 			continue
 		}
-
 		accumulator.TraceId = jaegerTraceID(ctx)
 		accumulator.End = extents[i].End
 		currentRes, err := extents[i].toResponse()

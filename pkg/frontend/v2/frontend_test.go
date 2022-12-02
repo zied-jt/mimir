@@ -9,6 +9,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,24 +24,32 @@ import (
 	"github.com/grafana/dskit/test"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/user"
 	"go.uber.org/atomic"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/grafana/mimir/pkg/frontend/v2/frontendv2pb"
 	"github.com/grafana/mimir/pkg/querier/stats"
+	"github.com/grafana/mimir/pkg/scheduler/schedulerdiscovery"
 	"github.com/grafana/mimir/pkg/scheduler/schedulerpb"
+	"github.com/grafana/mimir/pkg/util/servicediscovery"
 )
 
 const testFrontendWorkerConcurrency = 5
 
 func setupFrontend(t *testing.T, reg prometheus.Registerer, schedulerReplyFunc func(f *Frontend, msg *schedulerpb.FrontendToScheduler) *schedulerpb.SchedulerToFrontend) (*Frontend, *mockScheduler) {
+	return setupFrontendWithConcurrencyAndServerOptions(t, reg, schedulerReplyFunc, testFrontendWorkerConcurrency)
+}
+
+func setupFrontendWithConcurrencyAndServerOptions(t *testing.T, reg prometheus.Registerer, schedulerReplyFunc func(f *Frontend, msg *schedulerpb.FrontendToScheduler) *schedulerpb.SchedulerToFrontend, concurrency int, opts ...grpc.ServerOption) (*Frontend, *mockScheduler) {
 	l, err := net.Listen("tcp", "")
 	require.NoError(t, err)
 
-	server := grpc.NewServer()
+	server := grpc.NewServer(opts...)
 
 	h, p, err := net.SplitHostPort(l.Addr().String())
 	require.NoError(t, err)
@@ -49,12 +60,11 @@ func setupFrontend(t *testing.T, reg prometheus.Registerer, schedulerReplyFunc f
 	cfg := Config{}
 	flagext.DefaultValues(&cfg)
 	cfg.SchedulerAddress = l.Addr().String()
-	cfg.WorkerConcurrency = testFrontendWorkerConcurrency
+	cfg.WorkerConcurrency = concurrency
 	cfg.Addr = h
 	cfg.Port = grpcPort
 
-	//logger := log.NewLogfmtLogger(os.Stdout)
-	logger := log.NewNopLogger()
+	logger := log.NewLogfmtLogger(os.Stdout)
 	f, err := NewFrontend(cfg, logger, reg)
 	require.NoError(t, err)
 
@@ -63,17 +73,18 @@ func setupFrontend(t *testing.T, reg prometheus.Registerer, schedulerReplyFunc f
 	ms := newMockScheduler(t, f, schedulerReplyFunc)
 	schedulerpb.RegisterSchedulerForFrontendServer(server, ms)
 
-	require.NoError(t, services.StartAndAwaitRunning(context.Background(), f))
-	t.Cleanup(func() {
-		_ = services.StopAndAwaitTerminated(context.Background(), f)
-	})
-
 	go func() {
 		_ = server.Serve(l)
 	}()
 
 	t.Cleanup(func() {
 		_ = l.Close()
+		server.GracefulStop()
+	})
+
+	require.NoError(t, services.StartAndAwaitRunning(context.Background(), f))
+	t.Cleanup(func() {
+		_ = services.StopAndAwaitTerminated(context.Background(), f)
 	})
 
 	// Wait for frontend to connect to scheduler.
@@ -162,7 +173,7 @@ func TestFrontendRequestsPerWorkerMetric(t *testing.T) {
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expectedMetrics), "cortex_query_frontend_workers_enqueued_requests_total"))
 
 	// Manually remove the address, check that label is removed.
-	f.schedulerWorkers.AddressRemoved(f.cfg.SchedulerAddress)
+	f.schedulerWorkers.InstanceRemoved(servicediscovery.Instance{Address: f.cfg.SchedulerAddress, InUse: true})
 	expectedMetrics = ``
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expectedMetrics), "cortex_query_frontend_workers_enqueued_requests_total"))
 }
@@ -190,6 +201,16 @@ func TestFrontendRetryEnqueue(t *testing.T) {
 	})
 	_, err := f.RoundTripGRPC(user.InjectOrgID(context.Background(), userID), &httpgrpc.HTTPRequest{})
 	require.NoError(t, err)
+}
+
+func TestFrontendTooManyRequests(t *testing.T) {
+	f, _ := setupFrontend(t, nil, func(f *Frontend, msg *schedulerpb.FrontendToScheduler) *schedulerpb.SchedulerToFrontend {
+		return &schedulerpb.SchedulerToFrontend{Status: schedulerpb.TOO_MANY_REQUESTS_PER_TENANT}
+	})
+
+	resp, err := f.RoundTripGRPC(user.InjectOrgID(context.Background(), "test"), &httpgrpc.HTTPRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int32(http.StatusTooManyRequests), resp.Code)
 }
 
 func TestFrontendEnqueueFailure(t *testing.T) {
@@ -295,7 +316,7 @@ func TestFrontendFailedCancellation(t *testing.T) {
 		}
 		f.schedulerWorkers.mu.Unlock()
 
-		f.schedulerWorkers.AddressRemoved(addr)
+		f.schedulerWorkers.InstanceRemoved(servicediscovery.Instance{Address: addr, InUse: true})
 
 		// Wait for worker goroutines to stop.
 		time.Sleep(100 * time.Millisecond)
@@ -371,4 +392,92 @@ func (m *mockScheduler) FrontendLoop(frontend schedulerpb.SchedulerForFrontend_F
 			return err
 		}
 	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	tests := map[string]struct {
+		setup       func(cfg *Config)
+		expectedErr string
+	}{
+		"should pass with default config": {
+			setup: func(cfg *Config) {},
+		},
+		"should pass if scheduler address is configured, and query-scheduler discovery mode is the default one": {
+			setup: func(cfg *Config) {
+				cfg.SchedulerAddress = "localhost:9095"
+			},
+		},
+		"should fail if query-scheduler service discovery is set to ring, and scheduler address is configured": {
+			setup: func(cfg *Config) {
+				cfg.QuerySchedulerDiscovery.Mode = schedulerdiscovery.ModeRing
+				cfg.SchedulerAddress = "localhost:9095"
+			},
+			expectedErr: `scheduler address cannot be specified when query-scheduler service discovery mode is set to 'ring'`,
+		},
+	}
+
+	for testName, testData := range tests {
+		t.Run(testName, func(t *testing.T) {
+			cfg := Config{}
+			flagext.DefaultValues(&cfg)
+			testData.setup(&cfg)
+
+			actualErr := cfg.Validate(log.NewNopLogger())
+			if testData.expectedErr == "" {
+				require.NoError(t, actualErr)
+			} else {
+				require.Error(t, actualErr)
+				assert.ErrorContains(t, actualErr, testData.expectedErr)
+			}
+		})
+	}
+}
+
+func TestWithClosingGrpcServer(t *testing.T) {
+	// This test is easier with single frontend worker.
+	const frontendConcurrency = 1
+	const userID = "test"
+
+	f, _ := setupFrontendWithConcurrencyAndServerOptions(t, nil, func(f *Frontend, msg *schedulerpb.FrontendToScheduler) *schedulerpb.SchedulerToFrontend {
+		return &schedulerpb.SchedulerToFrontend{Status: schedulerpb.TOO_MANY_REQUESTS_PER_TENANT}
+	}, frontendConcurrency, grpc.KeepaliveParams(keepalive.ServerParameters{
+		MaxConnectionIdle:     100 * time.Millisecond,
+		MaxConnectionAge:      100 * time.Millisecond,
+		MaxConnectionAgeGrace: 100 * time.Millisecond,
+		Time:                  1 * time.Second,
+		Timeout:               1 * time.Second,
+	}))
+
+	// Connection will be established on the first roundtrip.
+	resp, err := f.RoundTripGRPC(user.InjectOrgID(context.Background(), userID), &httpgrpc.HTTPRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int(resp.Code), http.StatusTooManyRequests)
+
+	// Verify that there is one stream open.
+	require.Equal(t, 1, checkStreamGoroutines())
+
+	// Wait a bit, to make sure that server closes connection.
+	time.Sleep(1 * time.Second)
+
+	// Despite server closing connections, stream-related goroutines still exist.
+	require.Equal(t, 1, checkStreamGoroutines())
+
+	// Another request will work as before, because worker will recreate connection.
+	resp, err = f.RoundTripGRPC(user.InjectOrgID(context.Background(), userID), &httpgrpc.HTTPRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int(resp.Code), http.StatusTooManyRequests)
+
+	// There should still be only one stream open, and one goroutine created for it.
+	// Previously frontend leaked goroutine because stream that received "EOF" due to server closing the connection, never stopped its goroutine.
+	require.Equal(t, 1, checkStreamGoroutines())
+}
+
+func checkStreamGoroutines() int {
+	const streamGoroutineStackFrameTrailer = "created by google.golang.org/grpc.newClientStreamWithParams"
+
+	buf := make([]byte, 1000000)
+	stacklen := runtime.Stack(buf, true)
+
+	goroutineStacks := string(buf[:stacklen])
+	return strings.Count(goroutineStacks, streamGoroutineStackFrameTrailer)
 }

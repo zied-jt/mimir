@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -36,14 +35,15 @@ import (
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/thanos/pkg/objstore/filesystem"
+	"github.com/thanos-io/objstore/providers/filesystem"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 
+	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
 	"github.com/grafana/mimir/pkg/storage/tsdb/bucketindex"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 )
 
 func TestSyncer_GarbageCollect_e2e(t *testing.T) {
@@ -196,7 +196,7 @@ func TestGroupCompactE2E(t *testing.T) {
 		// in which case error is logger and test is failed. (We cannot use Fatal or FailNow from a goroutine).
 		go func() {
 			for ctx.Err() == nil {
-				fs, err := ioutil.ReadDir(dir)
+				fs, err := os.ReadDir(dir)
 				if err != nil && !os.IsNotExist(err) {
 					t.Log("error while listing directory", dir)
 					t.Fail()
@@ -242,7 +242,7 @@ func TestGroupCompactE2E(t *testing.T) {
 		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion)
 		require.NoError(t, err)
 
-		comp, err := tsdb.NewLeveledCompactor(ctx, reg, logger, []int64{1000, 3000}, nil, nil)
+		comp, err := tsdb.NewLeveledCompactor(ctx, reg, logger, []int64{1000, 3000}, nil, nil, true)
 		require.NoError(t, err)
 
 		planner := NewSplitAndMergePlanner([]int64{1000, 3000})
@@ -265,25 +265,25 @@ func TestGroupCompactE2E(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "dir %s should be remove after compaction.", dir)
 
 		// Test label name with slash, regression: https://github.com/thanos-io/thanos/issues/1661.
-		extLabels := labels.Labels{{Name: "e1", Value: "1/weird"}}
-		extLabels2 := labels.Labels{{Name: "e1", Value: "1"}}
+		extLabels := labels.FromStrings("e1", "1/weird")
+		extLabels2 := labels.FromStrings("e1", "1")
 		metas := createAndUpload(t, bkt, []blockgenSpec{
 			{
 				numSamples: 100, mint: 500, maxt: 1000, extLset: extLabels, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "1"}},
-					{{Name: "a", Value: "2"}, {Name: "b", Value: "2"}},
-					{{Name: "a", Value: "3"}},
-					{{Name: "a", Value: "4"}},
+					labels.FromStrings("a", "1"),
+					labels.FromStrings("a", "2", "b", "2"),
+					labels.FromStrings("a", "3"),
+					labels.FromStrings("a", "4"),
 				},
 			},
 			{
 				numSamples: 100, mint: 2000, maxt: 3000, extLset: extLabels, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "3"}},
-					{{Name: "a", Value: "4"}},
-					{{Name: "a", Value: "5"}},
-					{{Name: "a", Value: "6"}},
+					labels.FromStrings("a", "3"),
+					labels.FromStrings("a", "4"),
+					labels.FromStrings("a", "5"),
+					labels.FromStrings("a", "6"),
 				},
 			},
 			// Mix order to make sure compactor is able to deduct min time / max time.
@@ -297,56 +297,56 @@ func TestGroupCompactE2E(t *testing.T) {
 			{
 				numSamples: 100, mint: 3000, maxt: 4000, extLset: extLabels, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "7"}},
+					labels.FromStrings("a", "7"),
 				},
 			},
 			// Extra block for "distraction" for different resolution and one for different labels.
 			{
-				numSamples: 100, mint: 5000, maxt: 6000, extLset: labels.Labels{{Name: "e1", Value: "2"}}, res: 124,
+				numSamples: 100, mint: 5000, maxt: 6000, extLset: labels.FromStrings("e1", "2"), res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "7"}},
+					labels.FromStrings("a", "7"),
 				},
 			},
 			// Extra block for "distraction" for different resolution and one for different labels.
 			{
 				numSamples: 100, mint: 4000, maxt: 5000, extLset: extLabels, res: 0,
 				series: []labels.Labels{
-					{{Name: "a", Value: "7"}},
+					labels.FromStrings("a", "7"),
 				},
 			},
 			// Second group (extLabels2).
 			{
 				numSamples: 100, mint: 2000, maxt: 3000, extLset: extLabels2, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "3"}},
-					{{Name: "a", Value: "4"}},
-					{{Name: "a", Value: "6"}},
+					labels.FromStrings("a", "3"),
+					labels.FromStrings("a", "4"),
+					labels.FromStrings("a", "6"),
 				},
 			},
 			{
 				numSamples: 100, mint: 0, maxt: 1000, extLset: extLabels2, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "1"}},
-					{{Name: "a", Value: "2"}, {Name: "b", Value: "2"}},
-					{{Name: "a", Value: "3"}},
-					{{Name: "a", Value: "4"}},
+					labels.FromStrings("a", "1"),
+					labels.FromStrings("a", "2", "b", "2"),
+					labels.FromStrings("a", "3"),
+					labels.FromStrings("a", "4"),
 				},
 			},
 			// Due to TSDB compaction delay (not compacting fresh block), we need one more block to be pushed to trigger compaction.
 			{
 				numSamples: 100, mint: 3000, maxt: 4000, extLset: extLabels2, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "7"}},
+					labels.FromStrings("a", "7"),
 				},
 			},
 		}, []blockgenSpec{
 			{
 				numSamples: 100, mint: 0, maxt: 499, extLset: extLabels, res: 124,
 				series: []labels.Labels{
-					{{Name: "a", Value: "1"}},
-					{{Name: "a", Value: "2"}, {Name: "b", Value: "2"}},
-					{{Name: "a", Value: "3"}},
-					{{Name: "a", Value: "4"}},
+					labels.FromStrings("a", "1"),
+					labels.FromStrings("a", "1", "b", "2"),
+					labels.FromStrings("a", "3"),
+					labels.FromStrings("a", "4"),
 				},
 			},
 		})
@@ -451,7 +451,7 @@ func createAndUpload(t testing.TB, bkt objstore.Bucket, blocks []blockgenSpec, b
 	for _, b := range blocks {
 		id, meta := createBlock(ctx, t, prepareDir, b)
 		metas = append(metas, meta)
-		require.NoError(t, block.Upload(ctx, log.NewNopLogger(), bkt, filepath.Join(prepareDir, id.String()), metadata.NoneFunc))
+		require.NoError(t, mimir_tsdb.UploadBlock(ctx, log.NewNopLogger(), bkt, filepath.Join(prepareDir, id.String()), nil))
 	}
 	for _, b := range blocksWithOutOfOrderChunks {
 		id, meta := createBlock(ctx, t, prepareDir, b)
@@ -460,7 +460,7 @@ func createAndUpload(t testing.TB, bkt objstore.Bucket, blocks []blockgenSpec, b
 		require.NoError(t, err)
 
 		metas = append(metas, meta)
-		require.NoError(t, block.Upload(ctx, log.NewNopLogger(), bkt, filepath.Join(prepareDir, id.String()), metadata.NoneFunc))
+		require.NoError(t, mimir_tsdb.UploadBlock(ctx, log.NewNopLogger(), bkt, filepath.Join(prepareDir, id.String()), nil))
 	}
 
 	return metas
@@ -644,7 +644,7 @@ func createEmptyBlock(dir string, mint, maxt int64, extLset labels.Labels, resol
 		return ulid.ULID{}, err
 	}
 
-	if err := ioutil.WriteFile(path.Join(dir, uid.String(), "meta.json"), b, os.ModePerm); err != nil {
+	if err := os.WriteFile(path.Join(dir, uid.String(), "meta.json"), b, os.ModePerm); err != nil {
 		return ulid.ULID{}, errors.Wrap(err, "saving meta.json")
 	}
 
@@ -673,7 +673,7 @@ func createBlockWithOptions(
 	headOpts := tsdb.DefaultHeadOptions()
 	headOpts.ChunkDirRoot = filepath.Join(dir, "chunks")
 	headOpts.ChunkRange = 10000000000
-	h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+	h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 	if err != nil {
 		return id, errors.Wrap(err, "create head block")
 	}
@@ -723,7 +723,7 @@ func createBlockWithOptions(
 	if err := g.Wait(); err != nil {
 		return id, err
 	}
-	c, err := tsdb.NewLeveledCompactor(ctx, nil, log.NewNopLogger(), []int64{maxt - mint}, nil, nil)
+	c, err := tsdb.NewLeveledCompactor(ctx, nil, log.NewNopLogger(), []int64{maxt - mint}, nil, nil, true)
 	if err != nil {
 		return id, errors.Wrap(err, "create compactor")
 	}
@@ -800,9 +800,7 @@ func putOutOfOrderIndex(blockDir string, minTime int64, maxTime int64) error {
 	}
 
 	lbls := []labels.Labels{
-		[]labels.Label{
-			{Name: "lbl1", Value: "1"},
-		},
+		labels.FromStrings("lbl1", "1"),
 	}
 
 	// Sort labels as the index writer expects series in sorted order.

@@ -31,7 +31,7 @@ func main() {
 	// Parse CLI flags.
 	cfg := Config{}
 	flag.IntVar(&cfg.ServerMetricsPort, "server.metrics-port", 9900, "The port where metrics are exposed.")
-	flag.StringVar(&cfg.PathPrefix, "server.path-prefix", "", "Prefix for API paths (query-tee will accept Prometheus API calls at <prefix>/api/v1/...)")
+	flag.StringVar(&cfg.PathPrefix, "server.path-prefix", "", "Path prefix for API paths (query-tee will accept Prometheus API calls at <prefix>/api/v1/...). Example: -server.path-prefix=/prometheus")
 	cfg.LogLevel.RegisterFlags(flag.CommandLine)
 	cfg.ProxyConfig.RegisterFlags(flag.CommandLine)
 	flag.Parse()
@@ -86,7 +86,7 @@ func mimirReadRoutes(cfg Config) []querytee.Route {
 		{Path: prefix + "/api/v1/label/{name}/values", RouteName: "api_v1_label_name_values", Methods: []string{"GET", "POST"}, ResponseComparator: nil},
 		{Path: prefix + "/api/v1/series", RouteName: "api_v1_series", Methods: []string{"GET", "POST"}, ResponseComparator: nil},
 		{Path: prefix + "/api/v1/metadata", RouteName: "api_v1_metadata", Methods: []string{"GET", "POST"}, ResponseComparator: nil},
-		{Path: prefix + "/api/v1/rules", RouteName: "api_v1_rules", Methods: []string{"GET", "POST"}, ResponseComparator: nil},
+		{Path: prefix + "/prometheus/config/v1/rules", RouteName: "prometheus_config_v1_rules", Methods: []string{"GET", "POST"}, ResponseComparator: nil},
 		{Path: prefix + "/api/v1/alerts", RouteName: "api_v1_alerts", Methods: []string{"GET", "POST"}, ResponseComparator: nil},
 	}
 }

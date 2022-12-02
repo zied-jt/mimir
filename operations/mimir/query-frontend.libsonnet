@@ -2,7 +2,9 @@
   local container = $.core.v1.container,
 
   query_frontend_args::
-    $._config.grpcConfig
+    $._config.usageStatsConfig +
+    $._config.grpcConfig +
+    $._config.querySchedulerRingClientConfig +
     {
       target: 'query-frontend',
 
@@ -13,7 +15,7 @@
       'server.http-write-timeout': '1m',
 
       // Cache query results.
-      'query-frontend.align-querier-with-step': false,
+      'query-frontend.align-queries-with-step': false,
       'query-frontend.cache-results': true,
       'query-frontend.results-cache.backend': 'memcached',
       'query-frontend.results-cache.memcached.addresses': 'dnssrvnoa+memcached-frontend.%(namespace)s.svc.cluster.local:11211' % $._config,
@@ -24,12 +26,13 @@
 
       // Limit queries to 500 days, allow this to be override per-user.
       'store.max-query-length': '12000h',  // 500 Days
-      'runtime-config.file': '%s/overrides.yaml' % $._config.overrides_configmap_mountpoint,
-    },
+    } + $.mimirRuntimeConfigFile,
+
+  query_frontend_ports:: $.util.defaultPorts,
 
   newQueryFrontendContainer(name, args)::
     container.new(name, $._images.query_frontend) +
-    container.withPorts($.util.defaultPorts) +
+    container.withPorts($.query_frontend_ports) +
     container.withArgsMixin($.util.mapToFlags(args)) +
     $.jaeger_mixin +
     $.util.readinessProbe +
@@ -43,26 +46,22 @@
 
   newQueryFrontendDeployment(name, container)::
     deployment.new(name, $._config.queryFrontend.replicas, [container]) +
-    $.util.configVolumeMount($._config.overrides_configmap, $._config.overrides_configmap_mountpoint) +
-    (if $._config.query_frontend_allow_multiple_replicas_on_same_node then {} else $.util.antiAffinity) +
+    $.mimirVolumeMounts +
+    $.newMimirSpreadTopology(name, $._config.query_frontend_topology_spread_max_skew) +
     (if !std.isObject($._config.node_selector) then {} else deployment.mixin.spec.template.spec.withNodeSelectorMixin($._config.node_selector)) +
     deployment.mixin.spec.strategy.rollingUpdate.withMaxSurge(1) +
     deployment.mixin.spec.strategy.rollingUpdate.withMaxUnavailable(1),
 
-  query_frontend_deployment: self.newQueryFrontendDeployment('query-frontend', $.query_frontend_container),
+  query_frontend_deployment: if !$._config.is_microservices_deployment_mode then null else
+    self.newQueryFrontendDeployment('query-frontend', $.query_frontend_container),
 
-  local service = $.core.v1.service,
-
-  query_frontend_service:
+  query_frontend_service: if !$._config.is_microservices_deployment_mode then null else
     $.util.serviceFor($.query_frontend_deployment, $._config.service_ignored_labels),
 
-  query_frontend_discovery_service:
-    $.util.serviceFor($.query_frontend_deployment, $._config.service_ignored_labels) +
+  query_frontend_discovery_service: if !$._config.is_microservices_deployment_mode then null else
     // Make sure that query frontend worker, running in the querier, do resolve
     // each query-frontend pod IP and NOT the service IP. To make it, we do NOT
     // use the service cluster IP so that when the service DNS is resolved it
     // returns the set of query-frontend IPs.
-    service.mixin.spec.withPublishNotReadyAddresses(true) +
-    service.mixin.spec.withClusterIp('None') +
-    service.mixin.metadata.withName('query-frontend-discovery'),
+    $.newMimirDiscoveryService('query-frontend-discovery', $.query_frontend_deployment),
 }

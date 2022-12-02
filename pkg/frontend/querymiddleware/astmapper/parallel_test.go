@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -193,6 +194,59 @@ func TestCanParallel_String(t *testing.T) {
 			require.Nil(t, err)
 			res := CanParallelize(expr, log.NewNopLogger())
 			require.Equal(t, c.expected, res)
+		})
+	}
+}
+
+func TestFunctionsWithDefaultsIsUpToDate(t *testing.T) {
+	for name, f := range parser.Functions {
+		t.Run(name, func(t *testing.T) {
+			if f.Variadic == 0 {
+				return
+			}
+			if f.Name == "label_join" {
+				// label_join has no defaults, it just accepts any number of labels
+				return
+			}
+			if f.Name == "round" {
+				// round has a default value for the second scalar value, which is not relevant for sharding purposes.
+				return
+			}
+
+			// Rest of the functions with known defaults are functions with a default time() argument.
+			require.Containsf(t, FuncsWithDefaultTimeArg, name, "Function %q has variable arguments, and it's not in the list of functions with default time() argument.")
+		})
+	}
+}
+
+func TestCountVectorSelectors(t *testing.T) {
+	tests := map[string]struct {
+		expr     string
+		expected int
+	}{
+		"no vector selectors": {
+			expr:     "1",
+			expected: 0,
+		},
+		"input is a vector selector": {
+			expr:     "metric",
+			expected: 1,
+		},
+		"input expr contains a vector selector": {
+			expr:     "1 + metric",
+			expected: 1,
+		},
+		"input expr contains multiple vector selectors": {
+			expr:     "1 + metric + sum(metric) + sum(rate(metric[1m]))",
+			expected: 3,
+		},
+	}
+
+	for testName, testData := range tests {
+		t.Run(testName, func(t *testing.T) {
+			expr, err := parser.ParseExpr(testData.expr)
+			require.Nil(t, err)
+			assert.Equal(t, testData.expected, countVectorSelectors(expr))
 		})
 	}
 }

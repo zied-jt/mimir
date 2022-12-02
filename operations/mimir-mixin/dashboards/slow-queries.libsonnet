@@ -17,7 +17,7 @@ local filename = 'mimir-slow-queries.json';
           targets: [
             {
               // Filter out the remote read endpoint.
-              expr: '{%s=~"$cluster",namespace=~"$namespace",name=~"query-frontend.*"} |= "query stats" != "/api/v1/read" | logfmt | user=~"${tenant_id}" | response_time > ${min_duration}' % $._config.per_cluster_label,
+              expr: '{%s=~"$cluster",%s=~"$namespace",name=~"query-frontend.*"} |= "query stats" != "/api/v1/read" | logfmt | user=~"${tenant_id}" | response_time > ${min_duration}' % [$._config.per_cluster_label, $._config.per_namespace_label],
               instant: false,
               legendFormat: '',
               range: true,
@@ -29,8 +29,10 @@ local filename = 'mimir-slow-queries.json';
           transformations: [
             {
               // Convert labels to fields.
-              id: 'labelsToFields',
-              options: {},
+              id: 'extractFields',
+              options: {
+                source: 'labels',
+              },
             },
             {
               // Compute the query time range.
@@ -52,7 +54,7 @@ local filename = 'mimir-slow-queries.json';
               id: 'organize',
               options: {
                 // Hide fields we don't care.
-                local hiddenFields = ['caller', 'cluster', 'container', 'host', 'id', 'job', 'level', 'line', 'method', 'msg', 'name', 'namespace', 'param_end', 'param_start', 'param_time', 'path', 'pod', 'pod_template_hash', 'query_wall_time_seconds', 'stream', 'traceID', 'tsNs'],
+                local hiddenFields = ['caller', 'cluster', 'container', 'host', 'id', 'job', 'level', 'line', 'method', 'msg', 'name', 'namespace', 'param_end', 'param_start', 'param_time', 'path', 'pod', 'pod_template_hash', 'query_wall_time_seconds', 'stream', 'traceID', 'tsNs', 'labels', 'Line', 'Time'],
 
                 excludeByName: {
                   [field]: true
@@ -173,9 +175,9 @@ local filename = 'mimir-slow-queries.json';
     } + {
       templating+: {
         list: [
-          // Do not allow to include all clusters/namespaces otherwise this dashboard
+          // Do not allow to include all namespaces otherwise this dashboard
           // risks to explode because it shows resources per pod.
-          l + (if (l.name == 'cluster' || l.name == 'namespace') then { includeAll: false } else {})
+          l + (if (l.name == 'namespace') then { includeAll: false } else {})
           for l in super.list
         ],
       },

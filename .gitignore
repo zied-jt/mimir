@@ -4,6 +4,7 @@ cmd/mimir/mimir
 cmd/query-tee/query-tee
 cmd/metaconvert/metaconvert
 cmd/mimir-continuous-test/mimir-continuous-test
+.bak
 .uptodate
 .pkg
 .cache

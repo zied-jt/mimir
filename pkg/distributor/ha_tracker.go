@@ -27,6 +27,8 @@ import (
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/util"
+	"github.com/grafana/mimir/pkg/util/globalerror"
+	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 var (
@@ -138,7 +140,7 @@ type haClusterInfo struct {
 	nonElectedLastSeenTimestamp int64
 }
 
-// NewClusterTracker returns a new HA cluster tracker using either Consul
+// newHATracker returns a new HA cluster tracker using either Consul
 // or in-memory KV store. Tracker must be started via StartAsync().
 func newHATracker(cfg HATrackerConfig, limits haTrackerLimits, reg prometheus.Registerer, logger log.Logger) (*haTracker, error) {
 	var jitter time.Duration
@@ -401,7 +403,7 @@ func (h *haTracker) cleanupOldReplicas(ctx context.Context, deadline time.Time) 
 }
 
 // checkReplica checks the cluster and replica against the local cache to see
-// if we should accept the incomming sample. It will return replicasNotMatchError
+// if we should accept the incoming sample. It will return replicasNotMatchError
 // if we shouldn't store this sample but are accepting samples from another
 // replica for the cluster.
 // Updates to and from the KV store are handled in the background, except
@@ -528,7 +530,9 @@ type tooManyClustersError struct {
 }
 
 func (e tooManyClustersError) Error() string {
-	return fmt.Sprintf("too many HA clusters (limit: %d)", e.limit)
+	return globalerror.TooManyHAClusters.MessageWithPerTenantLimitConfig(
+		fmt.Sprintf("the write request has been rejected because the maximum number of high-availability (HA) clusters has been reached for this tenant (limit: %d)", e.limit),
+		validation.HATrackerMaxClustersFlag)
 }
 
 // Needed for errors.Is to work properly.
@@ -555,15 +559,9 @@ func findHALabels(replicaLabel, clusterLabel string, labels []mimirpb.LabelAdapt
 }
 
 func (h *haTracker) cleanupHATrackerMetricsForUser(userID string) {
-	filter := map[string]string{"user": userID}
+	filter := prometheus.Labels{"user": userID}
 
-	if err := util.DeleteMatchingLabels(h.electedReplicaChanges, filter); err != nil {
-		level.Warn(h.logger).Log("msg", "failed to remove cortex_ha_tracker_elected_replica_changes_total metric for user", "user", userID, "err", err)
-	}
-	if err := util.DeleteMatchingLabels(h.electedReplicaTimestamp, filter); err != nil {
-		level.Warn(h.logger).Log("msg", "failed to remove cortex_ha_tracker_elected_replica_timestamp_seconds metric for user", "user", userID, "err", err)
-	}
-	if err := util.DeleteMatchingLabels(h.kvCASCalls, filter); err != nil {
-		level.Warn(h.logger).Log("msg", "failed to remove cortex_ha_tracker_kv_store_cas_total metric for user", "user", userID, "err", err)
-	}
+	h.electedReplicaChanges.DeletePartialMatch(filter)
+	h.electedReplicaTimestamp.DeletePartialMatch(filter)
+	h.kvCASCalls.DeletePartialMatch(filter)
 }

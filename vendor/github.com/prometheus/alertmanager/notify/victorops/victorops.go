@@ -19,9 +19,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
@@ -64,14 +67,25 @@ const (
 
 // Notify implements the Notifier interface.
 func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
-
 	var err error
 	var (
 		data   = notify.GetTemplateData(ctx, n.tmpl, as, n.logger)
 		tmpl   = notify.TmplText(n.tmpl, data, &err)
 		apiURL = n.conf.APIURL.Copy()
 	)
-	apiURL.Path += fmt.Sprintf("%s/%s", n.conf.APIKey, tmpl(n.conf.RoutingKey))
+
+	var apiKey string
+	if n.conf.APIKey != "" {
+		apiKey = string(n.conf.APIKey)
+	} else {
+		content, fileErr := os.ReadFile(n.conf.APIKeyFile)
+		if fileErr != nil {
+			return false, errors.Wrap(fileErr, "failed to read API key from file")
+		}
+		apiKey = strings.TrimSpace(string(content))
+	}
+
+	apiURL.Path += fmt.Sprintf("%s/%s", apiKey, tmpl(n.conf.RoutingKey))
 	if err != nil {
 		return false, fmt.Errorf("templating error: %s", err)
 	}
@@ -87,7 +101,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 	}
 	defer notify.Drain(resp)
 
-	return n.retrier.Check(resp.StatusCode, nil)
+	return n.retrier.Check(resp.StatusCode, resp.Body)
 }
 
 // Create the JSON payload to be sent to the VictorOps API.

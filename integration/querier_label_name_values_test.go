@@ -100,7 +100,7 @@ func TestQuerierLabelNamesAndValues(t *testing.T) {
 			defer s.Close()
 
 			// Set configuration.
-			flags := mergeFlags(BlocksStorageFlags(), map[string]string{
+			flags := mergeFlags(BlocksStorageFlags(), BlocksStorageS3Flags(), map[string]string{
 				"-querier.cardinality-analysis-enabled": "true",
 				"-ingester.ring.replication-factor":     "3",
 			})
@@ -142,7 +142,7 @@ func TestQuerierLabelNamesAndValues(t *testing.T) {
 
 			for i := 1; i <= numSeriesToPush; i++ {
 				metricName := fmt.Sprintf("series_%d", i)
-				series, _ := generateSeries(metricName, now,
+				series, _, _ := generateSeries(metricName, now,
 					prompb.Label{Name: "env", Value: cardinalityEnvLabelValues[i%len(cardinalityEnvLabelValues)]},
 					prompb.Label{Name: "job", Value: cardinalityJobLabelValues[i%len(cardinalityJobLabelValues)]},
 				)
@@ -321,7 +321,7 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 			defer s.Close()
 
 			// Set configuration.
-			flags := mergeFlags(BlocksStorageFlags(), map[string]string{
+			flags := mergeFlags(BlocksStorageFlags(), BlocksStorageS3Flags(), map[string]string{
 				"-querier.cardinality-analysis-enabled": "true",
 				"-ingester.ring.replication-factor":     "3",
 			})
@@ -365,7 +365,7 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 
 			for i := 1; i <= numSeriesToPush; i++ {
 				metricName := fmt.Sprintf("series_%d", i)
-				series, _ := generateSeries(metricName, now,
+				series, _, _ := generateSeries(metricName, now,
 					prompb.Label{Name: "env", Value: cardinalityEnvLabelValues[i%len(cardinalityEnvLabelValues)]},
 					prompb.Label{Name: "job", Value: cardinalityJobLabelValues[i%len(cardinalityJobLabelValues)]},
 				)

@@ -5,7 +5,7 @@ package querymiddleware
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +34,7 @@ import (
 	apierror "github.com/grafana/mimir/pkg/api/error"
 	"github.com/grafana/mimir/pkg/cache"
 	"github.com/grafana/mimir/pkg/mimirpb"
+	"github.com/grafana/mimir/pkg/querier/stats"
 	"github.com/grafana/mimir/pkg/util"
 )
 
@@ -112,22 +113,36 @@ func TestSplitAndCacheMiddleware_SplitByInterval(t *testing.T) {
 	// Execute a query range request.
 	req, err := http.NewRequest("GET", queryURL, http.NoBody)
 	require.NoError(t, err)
-	req = req.WithContext(user.InjectOrgID(context.Background(), "user-1"))
+	_, ctx := stats.ContextWithEmptyStats(context.Background())
+	req = req.WithContext(user.InjectOrgID(ctx, "user-1"))
 
 	resp, err := roundtripper.RoundTrip(req)
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
 
-	actualBody, err := ioutil.ReadAll(resp.Body)
+	actualBody, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, expectedResponse, string(actualBody))
 	require.Equal(t, int32(2), actualCount.Load())
 
+	// Assert metrics
 	assert.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(`
-		# HELP cortex_frontend_split_queries_total Total number of underlying query requests after the split by interval is applied
+		# HELP cortex_frontend_query_result_cache_attempted_total Total number of queries that were attempted to be fetched from cache.
+		# TYPE cortex_frontend_query_result_cache_attempted_total counter
+		cortex_frontend_query_result_cache_attempted_total 0
+		# HELP cortex_frontend_query_result_cache_skipped_total Total number of times a query was not cacheable because of a reason. This metric is tracked for each partial query when time-splitting is enabled.
+		# TYPE cortex_frontend_query_result_cache_skipped_total counter
+		cortex_frontend_query_result_cache_skipped_total{reason="has-modifiers"} 0
+		cortex_frontend_query_result_cache_skipped_total{reason="too-new"} 0
+		cortex_frontend_query_result_cache_skipped_total{reason="unaligned-time-range"} 0
+		# HELP cortex_frontend_split_queries_total Total number of underlying query requests after the split by interval is applied.
 		# TYPE cortex_frontend_split_queries_total counter
 		cortex_frontend_split_queries_total 2
 	`)))
+
+	// Assert query stats from context
+	queryStats := stats.FromContext(ctx)
+	assert.Equal(t, uint32(2), queryStats.LoadSplitQueries())
 }
 
 func TestSplitAndCacheMiddleware_ResultsCache(t *testing.T) {
@@ -141,7 +156,7 @@ func TestSplitAndCacheMiddleware_ResultsCache(t *testing.T) {
 		mockLimits{maxCacheFreshness: 10 * time.Minute},
 		PrometheusCodec,
 		cacheBackend,
-		constSplitter(day),
+		ConstSplitter(day),
 		PrometheusResponseExtractor{},
 		resultsCacheAlwaysEnabled,
 		log.NewNopLogger(),
@@ -181,12 +196,17 @@ func TestSplitAndCacheMiddleware_ResultsCache(t *testing.T) {
 		Query: `{__name__=~".+"}`,
 	})
 
-	ctx := user.InjectOrgID(context.Background(), "1")
+	_, ctx := stats.ContextWithEmptyStats(context.Background())
+	ctx = user.InjectOrgID(ctx, "1")
 	resp, err := rc.Do(ctx, req)
 	require.NoError(t, err)
+
 	require.Equal(t, 1, downstreamReqs)
 	require.Equal(t, expectedResponse, resp)
 	assert.Equal(t, 1, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats := stats.FromContext(ctx)
+	assert.Equal(t, uint32(1), queryStats.LoadSplitQueries())
 
 	// Doing same request again shouldn't change anything.
 	resp, err = rc.Do(ctx, req)
@@ -194,6 +214,9 @@ func TestSplitAndCacheMiddleware_ResultsCache(t *testing.T) {
 	require.Equal(t, 1, downstreamReqs)
 	require.Equal(t, expectedResponse, resp)
 	assert.Equal(t, 1, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats = stats.FromContext(ctx)
+	assert.Equal(t, uint32(1), queryStats.LoadSplitQueries())
 
 	// Doing request with new end time should do one more query.
 	req = req.WithStartEnd(req.GetStart(), req.GetEnd()+step)
@@ -201,10 +224,14 @@ func TestSplitAndCacheMiddleware_ResultsCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, downstreamReqs)
 	assert.Equal(t, 2, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats = stats.FromContext(ctx)
+	assert.Equal(t, uint32(2), queryStats.LoadSplitQueries())
 }
 
 func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotLookupCacheIfStepIsNotAligned(t *testing.T) {
 	cacheBackend := cache.NewInstrumentedMockCache()
+	reg := prometheus.NewPedanticRegistry()
 
 	mw := newSplitAndCacheMiddleware(
 		true,
@@ -214,11 +241,11 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotLookupCacheIfStepIsNotAli
 		mockLimits{maxCacheFreshness: 10 * time.Minute},
 		PrometheusCodec,
 		cacheBackend,
-		constSplitter(day),
+		ConstSplitter(day),
 		PrometheusResponseExtractor{},
 		resultsCacheAlwaysEnabled,
 		log.NewNopLogger(),
-		prometheus.NewPedanticRegistry(),
+		reg,
 	)
 
 	expectedResponse := &PrometheusResponse{
@@ -253,15 +280,34 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotLookupCacheIfStepIsNotAli
 		Query: `{__name__=~".+"}`,
 	})
 
-	ctx := user.InjectOrgID(context.Background(), "1")
+	_, ctx := stats.ContextWithEmptyStats(context.Background())
+	ctx = user.InjectOrgID(ctx, "1")
 	resp, err := rc.Do(ctx, req)
 	require.NoError(t, err)
+
 	require.Equal(t, 1, downstreamReqs)
 	require.Equal(t, expectedResponse, resp)
 
 	// Should not touch the cache at all.
 	assert.Equal(t, 0, cacheBackend.CountFetchCalls())
 	assert.Equal(t, 0, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats := stats.FromContext(ctx)
+	assert.Equal(t, uint32(1), queryStats.LoadSplitQueries())
+	// Assert metrics
+	assert.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(`
+		# HELP cortex_frontend_query_result_cache_attempted_total Total number of queries that were attempted to be fetched from cache.
+		# TYPE cortex_frontend_query_result_cache_attempted_total counter
+		cortex_frontend_query_result_cache_attempted_total 1
+		# HELP cortex_frontend_query_result_cache_skipped_total Total number of times a query was not cacheable because of a reason. This metric is tracked for each partial query when time-splitting is enabled.
+		# TYPE cortex_frontend_query_result_cache_skipped_total counter
+		cortex_frontend_query_result_cache_skipped_total{reason="has-modifiers"} 0
+		cortex_frontend_query_result_cache_skipped_total{reason="too-new"} 0
+		cortex_frontend_query_result_cache_skipped_total{reason="unaligned-time-range"} 1
+		# HELP cortex_frontend_split_queries_total Total number of underlying query requests after the split by interval is applied.
+		# TYPE cortex_frontend_split_queries_total counter
+		cortex_frontend_split_queries_total 1
+	`)))
 }
 
 func TestSplitAndCacheMiddleware_ResultsCache_EnabledCachingOfStepUnalignedRequest(t *testing.T) {
@@ -275,7 +321,7 @@ func TestSplitAndCacheMiddleware_ResultsCache_EnabledCachingOfStepUnalignedReque
 		mockLimits{maxCacheFreshness: 10 * time.Minute},
 		PrometheusCodec,
 		cacheBackend,
-		constSplitter(day),
+		ConstSplitter(day),
 		PrometheusResponseExtractor{},
 		resultsCacheAlwaysEnabled,
 		log.NewNopLogger(),
@@ -314,15 +360,20 @@ func TestSplitAndCacheMiddleware_ResultsCache_EnabledCachingOfStepUnalignedReque
 		Query: `{__name__=~".+"}`,
 	})
 
-	ctx := user.InjectOrgID(context.Background(), "1")
+	_, ctx := stats.ContextWithEmptyStats(context.Background())
+	ctx = user.InjectOrgID(ctx, "1")
 	resp, err := rc.Do(ctx, req)
 	require.NoError(t, err)
+
 	require.Equal(t, 1, downstreamReqs)
 	require.Equal(t, expectedResponse, resp)
 
 	// Since we're caching unaligned requests, we should see that.
 	assert.Equal(t, 1, cacheBackend.CountFetchCalls())
 	assert.Equal(t, 1, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats := stats.FromContext(ctx)
+	assert.Equal(t, uint32(1), queryStats.LoadSplitQueries())
 
 	// Doing the same request reuses cached result.
 	resp, err = rc.Do(ctx, req)
@@ -331,6 +382,9 @@ func TestSplitAndCacheMiddleware_ResultsCache_EnabledCachingOfStepUnalignedReque
 	require.Equal(t, expectedResponse, resp)
 	assert.Equal(t, 2, cacheBackend.CountFetchCalls())
 	assert.Equal(t, 1, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats = stats.FromContext(ctx)
+	assert.Equal(t, uint32(1), queryStats.LoadSplitQueries())
 
 	// New request with slightly different Start time will not reuse the cached result.
 	req = req.WithStartEnd(parseTimeRFC3339(t, "2021-10-15T10:00:05Z").Unix()*1000, parseTimeRFC3339(t, "2021-10-15T12:00:05Z").Unix()*1000)
@@ -341,6 +395,9 @@ func TestSplitAndCacheMiddleware_ResultsCache_EnabledCachingOfStepUnalignedReque
 
 	assert.Equal(t, 3, cacheBackend.CountFetchCalls())
 	assert.Equal(t, 2, cacheBackend.CountStoreCalls())
+	// Assert query stats from context
+	queryStats = stats.FromContext(ctx)
+	assert.Equal(t, uint32(2), queryStats.LoadSplitQueries())
 }
 
 func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMaxCacheFreshness(t *testing.T) {
@@ -362,6 +419,7 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMa
 		expectedDownstreamStartTime time.Time
 		expectedDownstreamEndTime   time.Time
 		expectedCachedResponses     []Response
+		expectedMetrics             string
 	}{
 		"should not cache a response if query time range is earlier than max cache freshness": {
 			queryStartTime: fiveMinutesAgo,
@@ -373,6 +431,19 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMa
 			expectedDownstreamStartTime: fiveMinutesAgo,
 			expectedDownstreamEndTime:   now,
 			expectedCachedResponses:     nil,
+			expectedMetrics: `
+				# HELP cortex_frontend_query_result_cache_attempted_total Total number of queries that were attempted to be fetched from cache.
+				# TYPE cortex_frontend_query_result_cache_attempted_total counter
+				cortex_frontend_query_result_cache_attempted_total 2
+				# HELP cortex_frontend_query_result_cache_skipped_total Total number of times a query was not cacheable because of a reason. This metric is tracked for each partial query when time-splitting is enabled.
+				# TYPE cortex_frontend_query_result_cache_skipped_total counter
+				cortex_frontend_query_result_cache_skipped_total{reason="has-modifiers"} 0
+				cortex_frontend_query_result_cache_skipped_total{reason="too-new"} 2
+				cortex_frontend_query_result_cache_skipped_total{reason="unaligned-time-range"} 0
+				# HELP cortex_frontend_split_queries_total Total number of underlying query requests after the split by interval is applied.
+				# TYPE cortex_frontend_split_queries_total counter
+				cortex_frontend_split_queries_total 0
+			`,
 		},
 		"should cache a response up until max cache freshness time ago": {
 			queryStartTime: twentyMinutesAgo,
@@ -395,7 +466,8 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMa
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
 			cacheBackend := cache.NewMockCache()
-			cacheSplitter := constSplitter(day)
+			cacheSplitter := ConstSplitter(day)
+			reg := prometheus.NewPedanticRegistry()
 
 			mw := newSplitAndCacheMiddleware(
 				false, // No interval splitting.
@@ -409,7 +481,7 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMa
 				PrometheusResponseExtractor{},
 				resultsCacheAlwaysEnabled,
 				log.NewNopLogger(),
-				prometheus.NewPedanticRegistry(),
+				reg,
 			)
 
 			calls := 0
@@ -448,7 +520,7 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMa
 			require.Equal(t, testData.downstreamResponse, resp)
 
 			// Check if the response was cached.
-			cacheKey := cacheHashKey(cacheSplitter.GenerateCacheKey(userID, req))
+			cacheKey := cacheHashKey(cacheSplitter.GenerateCacheKey(ctx, userID, req))
 			found := cacheBackend.Fetch(ctx, []string{cacheKey})
 
 			if len(testData.expectedCachedResponses) == 0 {
@@ -467,6 +539,10 @@ func TestSplitAndCacheMiddleware_ResultsCache_ShouldNotCacheRequestEarlierThanMa
 				}
 
 				assert.Equal(t, testData.expectedCachedResponses, actualCachedResponses)
+			}
+
+			if testData.expectedMetrics != "" {
+				assert.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(testData.expectedMetrics)))
 			}
 		})
 	}
@@ -613,7 +689,7 @@ func TestSplitAndCacheMiddleware_ResultsCacheFuzzy(t *testing.T) {
 					},
 					PrometheusCodec,
 					cache.NewMockCache(),
-					constSplitter(day),
+					ConstSplitter(day),
 					PrometheusResponseExtractor{},
 					resultsCacheAlwaysEnabled,
 					log.NewNopLogger(),
@@ -839,7 +915,7 @@ func TestSplitAndCacheMiddleware_ResultsCache_ExtentsEdgeCases(t *testing.T) {
 		t.Run(testName, func(t *testing.T) {
 			ctx := user.InjectOrgID(context.Background(), userID)
 			cacheBackend := cache.NewInstrumentedMockCache()
-			cacheSplitter := constSplitter(day)
+			cacheSplitter := ConstSplitter(day)
 
 			mw := newSplitAndCacheMiddleware(
 				false, // No splitting.
@@ -859,8 +935,8 @@ func TestSplitAndCacheMiddleware_ResultsCache_ExtentsEdgeCases(t *testing.T) {
 			})).(*splitAndCacheMiddleware)
 
 			// Store all extents fixtures in the cache.
-			cacheKey := cacheSplitter.GenerateCacheKey(userID, testData.req)
-			mw.storeCacheExtents(ctx, cacheKey, testData.cachedExtents)
+			cacheKey := cacheSplitter.GenerateCacheKey(ctx, userID, testData.req)
+			mw.storeCacheExtents(ctx, cacheKey, []string{userID}, testData.cachedExtents)
 
 			// Run the request.
 			actualRes, err := mw.Do(ctx, testData.req)
@@ -894,7 +970,7 @@ func TestSplitAndCacheMiddleware_StoreAndFetchCacheExtents(t *testing.T) {
 		mockLimits{},
 		PrometheusCodec,
 		cacheBackend,
-		constSplitter(day),
+		ConstSplitter(day),
 		PrometheusResponseExtractor{},
 		resultsCacheAlwaysEnabled,
 		log.NewNopLogger(),
@@ -910,8 +986,8 @@ func TestSplitAndCacheMiddleware_StoreAndFetchCacheExtents(t *testing.T) {
 	})
 
 	t.Run("fetchCacheExtents() should return a slice with the same number of input keys and some extends filled up on partial cache hit", func(t *testing.T) {
-		mw.storeCacheExtents(ctx, "key-1", []Extent{mkExtent(10, 20)})
-		mw.storeCacheExtents(ctx, "key-3", []Extent{mkExtent(20, 30), mkExtent(40, 50)})
+		mw.storeCacheExtents(ctx, "key-1", nil, []Extent{mkExtent(10, 20)})
+		mw.storeCacheExtents(ctx, "key-3", nil, []Extent{mkExtent(20, 30), mkExtent(40, 50)})
 
 		actual := mw.fetchCacheExtents(ctx, []string{"key-1", "key-2", "key-3"})
 		expected := [][]Extent{{mkExtent(10, 20)}, nil, {mkExtent(20, 30), mkExtent(40, 50)}}
@@ -924,7 +1000,7 @@ func TestSplitAndCacheMiddleware_StoreAndFetchCacheExtents(t *testing.T) {
 		require.NoError(t, err)
 		cacheBackend.Store(ctx, map[string][]byte{cacheHashKey("key-1"): buf}, 0)
 
-		mw.storeCacheExtents(ctx, "key-3", []Extent{mkExtent(20, 30), mkExtent(40, 50)})
+		mw.storeCacheExtents(ctx, "key-3", nil, []Extent{mkExtent(20, 30), mkExtent(40, 50)})
 
 		actual := mw.fetchCacheExtents(ctx, []string{"key-1", "key-2", "key-3"})
 		expected := [][]Extent{nil, nil, {mkExtent(20, 30), mkExtent(40, 50)}}
@@ -941,7 +1017,7 @@ func TestSplitAndCacheMiddleware_WrapMultipleTimes(t *testing.T) {
 		mockLimits{},
 		PrometheusCodec,
 		cache.NewMockCache(),
-		constSplitter(day),
+		ConstSplitter(day),
 		PrometheusResponseExtractor{},
 		resultsCacheAlwaysEnabled,
 		log.NewNopLogger(),
@@ -1466,5 +1542,62 @@ func Test_evaluateAtModifier(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, expectedExpr.String(), out)
 		})
+	}
+}
+
+func TestSplitAndCacheMiddlewareLowerTTL(t *testing.T) {
+	mcache := cache.NewMockCache()
+	m := splitAndCacheMiddleware{
+		limits: mockLimits{
+			outOfOrderTimeWindow: model.Duration(time.Hour),
+		},
+		cache: mcache,
+	}
+
+	cases := []struct {
+		endTime time.Time
+		expTTL  time.Duration
+	}{
+		{
+			endTime: time.Now(),
+			expTTL:  resultsCacheLowerTTL,
+		},
+		{
+			endTime: time.Now().Add(-30 * time.Minute),
+			expTTL:  resultsCacheLowerTTL,
+		},
+		{
+			endTime: time.Now().Add(-59 * time.Minute),
+			expTTL:  resultsCacheLowerTTL,
+		},
+		{
+			endTime: time.Now().Add(-61 * time.Minute),
+			expTTL:  resultsCacheTTL,
+		},
+		{
+			endTime: time.Now().Add(-2 * time.Hour),
+			expTTL:  resultsCacheTTL,
+		},
+		{
+			endTime: time.Now().Add(-12 * time.Hour),
+			expTTL:  resultsCacheTTL,
+		},
+	}
+
+	ctx := context.Background()
+	for i, c := range cases {
+		// Store.
+		key := fmt.Sprintf("k%d", i)
+		m.storeCacheExtents(ctx, key, []string{"ten1"}, []Extent{
+			{Start: 0, End: c.endTime.UnixMilli()},
+		})
+
+		// Check.
+		key = cacheHashKey(key)
+		ci := mcache.GetItems()[key]
+		actualTTL := time.Until(ci.ExpiresAt)
+		// We use a tolerance of 50ms to avoid flaky tests.
+		require.Greater(t, actualTTL, c.expTTL-(50*time.Millisecond))
+		require.Less(t, actualTTL, c.expTTL+(50*time.Millisecond))
 	}
 }

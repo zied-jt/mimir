@@ -6,9 +6,10 @@
 package e2emimir
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/grafana/e2e"
 )
@@ -23,42 +24,42 @@ const (
 func GetDefaultImage() string {
 	// Get the mimir image from the MIMIR_IMAGE env variable,
 	// falling back to grafana/mimir:latest"
-	if os.Getenv("MIMIR_IMAGE") != "" {
-		return os.Getenv("MIMIR_IMAGE")
+	if img := os.Getenv("MIMIR_IMAGE"); img != "" {
+		return img
 	}
 
 	return "grafana/mimir:latest"
 }
 
-// GetExtraArgs returns the extra args to pass to the Docker command used to run Mimir.
-func GetExtraArgs() []string {
-	// Get extra args from the MIMIR_EXTRA_ARGS env variable
-	// falling back to an empty list
-	if os.Getenv("MIMIR_EXTRA_ARGS") != "" {
-		return strings.Fields(os.Getenv("MIMIR_EXTRA_ARGS"))
+func GetMimirtoolImage() string {
+	if img := os.Getenv("MIMIRTOOL_IMAGE"); img != "" {
+		return img
 	}
 
-	return nil
+	return "grafana/mimirtool:latest"
 }
 
-func buildArgsWithExtra(args []string) []string {
-	extraArgs := GetExtraArgs()
-	if len(extraArgs) > 0 {
-		return append(extraArgs, args...)
+func getExtraFlags() map[string]string {
+	str := os.Getenv("MIMIR_EXTRA_FLAGS")
+	if str == "" {
+		return nil
 	}
-
-	return args
+	extraArgs := map[string]string{}
+	if err := json.Unmarshal([]byte(str), &extraArgs); err != nil {
+		panic(fmt.Errorf("can't unmarshal MIMIR_EXTRA_FLAGS as JSON, it should be a map of arg name to arg value: %s", err))
+	}
+	return extraArgs
 }
 
 func newMimirServiceFromOptions(name string, defaultFlags, flags map[string]string, options ...Option) *MimirService {
 	o := newOptions(options)
-	serviceFlags := o.MapFlags(e2e.MergeFlags(defaultFlags, flags))
+	serviceFlags := o.MapFlags(e2e.MergeFlags(defaultFlags, flags, getExtraFlags()))
 	binaryName := getBinaryNameForBackwardsCompatibility(o.Image)
 
 	return NewMimirService(
 		name,
 		o.Image,
-		e2e.NewCommandWithoutEntrypoint(binaryName, buildArgsWithExtra(e2e.BuildArgs(serviceFlags))...),
+		e2e.NewCommandWithoutEntrypoint(binaryName, e2e.BuildArgs(serviceFlags)...),
 		e2e.NewHTTPReadinessProbe(o.HTTPPort, "/ready", 200, 299),
 		o.HTTPPort,
 		o.GRPCPort,
@@ -140,8 +141,7 @@ func NewIngester(name string, consulAddress string, flags map[string]string, opt
 			"-ingester.ring.store":           "consul",
 			"-ingester.ring.consul.hostname": consulAddress,
 			// Speed up the startup.
-			"-ingester.ring.min-ready-duration":          "0s",
-			"-ingester.ring.readiness-check-ring-health": "false",
+			"-ingester.ring.min-ready-duration": "0s",
 		},
 		flags,
 		options...,
@@ -205,8 +205,48 @@ func NewSingleBinary(name string, flags map[string]string, options ...Option) *M
 			"-target":    "all",
 			"-log.level": "warn",
 			// Speed up the startup.
-			"-ingester.ring.min-ready-duration":          "0s",
-			"-ingester.ring.readiness-check-ring-health": "false",
+			"-ingester.ring.min-ready-duration": "0s",
+		},
+		flags,
+		options...,
+	)
+}
+
+func NewReadInstance(name string, flags map[string]string, options ...Option) *MimirService {
+	return newMimirServiceFromOptions(
+		name,
+		map[string]string{
+			"-target":                           "read",
+			"-log.level":                        "warn",
+			"-ingester.ring.replication-factor": "1",
+		},
+		flags,
+		options...,
+	)
+}
+
+func NewWriteInstance(name string, flags map[string]string, options ...Option) *MimirService {
+	return newMimirServiceFromOptions(
+		name,
+		map[string]string{
+			"-target":                           "write",
+			"-log.level":                        "warn",
+			"-ingester.ring.replication-factor": "1",
+			// Speed up startup.
+			"-ingester.ring.min-ready-duration": "0s",
+		},
+		flags,
+		options...,
+	)
+}
+
+func NewBackendInstance(name string, flags map[string]string, options ...Option) *MimirService {
+	return newMimirServiceFromOptions(
+		name,
+		map[string]string{
+			"-target":                           "backend",
+			"-log.level":                        "warn",
+			"-ingester.ring.replication-factor": "1",
 		},
 		flags,
 		options...,
@@ -230,13 +270,13 @@ func NewAlertmanagerWithTLS(name string, flags map[string]string, options ...Opt
 	serviceFlags := o.MapFlags(e2e.MergeFlags(map[string]string{
 		"-target":    "alertmanager",
 		"-log.level": "warn",
-	}, flags))
+	}, flags, getExtraFlags()))
 	binaryName := getBinaryNameForBackwardsCompatibility(o.Image)
 
 	return NewMimirService(
 		name,
 		o.Image,
-		e2e.NewCommandWithoutEntrypoint(binaryName, buildArgsWithExtra(e2e.BuildArgs(serviceFlags))...),
+		e2e.NewCommandWithoutEntrypoint(binaryName, e2e.BuildArgs(serviceFlags)...),
 		e2e.NewTCPReadinessProbe(o.HTTPPort),
 		o.HTTPPort,
 		o.GRPCPort,
@@ -253,20 +293,6 @@ func NewRuler(name string, consulAddress string, flags map[string]string, option
 			// Configure the ingesters ring backend
 			"-ingester.ring.store":           "consul",
 			"-ingester.ring.consul.hostname": consulAddress,
-		},
-		flags,
-		options...,
-	)
-}
-
-func NewPurger(name string, flags map[string]string, options ...Option) *MimirService {
-	return newMimirServiceFromOptions(
-		name,
-		map[string]string{
-			"-target":                   "purger",
-			"-log.level":                "warn",
-			"-purger.object-store-type": "filesystem",
-			"-local.chunk-directory":    e2e.ContainerSharedDir,
 		},
 		flags,
 		options...,
@@ -346,6 +372,43 @@ func WithNoopOption() Option { return func(options *Options) {} }
 // FlagMapper is the type of function that maps flags, just to reduce some verbosity.
 type FlagMapper func(flags map[string]string) map[string]string
 
+// UnmarshalJSON unmarshals a single json object into a single FlagMapper, or an array into a ChainMapper.
+func (fm *FlagMapper) UnmarshalJSON(data []byte) error {
+	var val struct {
+		Rename map[string]string `json:"rename"`
+		Remove []string          `json:"remove"`
+		Set    map[string]string `json:"set"`
+	}
+	if err := json.Unmarshal(data, &val); err != nil {
+		// It's not an object, try to unmarshal it as an array, and build a chain mapper.
+		var chain []FlagMapper
+		if chainErr := json.Unmarshal(data, &chain); chainErr == nil {
+			*fm = ChainFlagMappers(chain...)
+			return nil
+		}
+		return err
+	}
+	set := 0
+	var m FlagMapper
+	if len(val.Rename) > 0 {
+		m = RenameFlagMapper(val.Rename)
+		set++
+	}
+	if len(val.Remove) > 0 {
+		m = RemoveFlagMapper(val.Remove)
+		set++
+	}
+	if len(val.Set) > 0 {
+		m = SetFlagMapper(val.Set)
+		set++
+	}
+	if set != 1 {
+		return fmt.Errorf("should set exactly one flag mapper, but %v set %d", val, set)
+	}
+	*fm = m
+	return nil
+}
+
 // NoopFlagMapper is a flag mapper that does not alter the provided flags.
 func NoopFlagMapper(flags map[string]string) map[string]string { return flags }
 
@@ -356,7 +419,7 @@ func ChainFlagMappers(mappers ...FlagMapper) FlagMapper {
 		for _, mapFlags := range mappers {
 			flags = mapFlags(copyFlags(flags))
 		}
-		return flags
+		return copyFlags(flags)
 	}
 }
 

@@ -17,10 +17,10 @@ import (
 	"github.com/grafana/dskit/flagext"
 	"github.com/oklog/ulid"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
 
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	"github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 	"github.com/grafana/mimir/pkg/util"
 	"github.com/grafana/mimir/pkg/util/listblocks"
 )
@@ -35,6 +35,7 @@ type config struct {
 	showParents         bool
 	showCompactionLevel bool
 	showBlockSize       bool
+	showStats           bool
 	splitCount          int
 	minTime             flagext.Time
 	maxTime             flagext.Time
@@ -43,8 +44,9 @@ type config struct {
 }
 
 func main() {
+	logger := gokitlog.NewNopLogger()
 	cfg := config{}
-	cfg.bucket.RegisterFlags(flag.CommandLine)
+	cfg.bucket.RegisterFlags(flag.CommandLine, logger)
 	flag.StringVar(&cfg.userID, "user", "", "User (tenant)")
 	flag.BoolVar(&cfg.showDeleted, "show-deleted", false, "Show deleted blocks")
 	flag.BoolVar(&cfg.showLabels, "show-labels", false, "Show block labels")
@@ -57,6 +59,7 @@ func main() {
 	flag.Var(&cfg.minTime, "min-time", "If set, only blocks with MinTime >= this value are printed")
 	flag.Var(&cfg.maxTime, "max-time", "If set, only blocks with MaxTime <= this value are printed")
 	flag.BoolVar(&cfg.useUlidTimeForMinTimeCheck, "use-ulid-time-for-min-time-check", false, "If true, meta.json files for blocks with ULID time before min-time are not loaded. This may incorrectly skip blocks that have data from the future (minT/maxT higher than ULID).")
+	flag.BoolVar(&cfg.showStats, "show-stats", false, "Show block stats (number of series, chunks, samples)")
 	flag.Parse()
 
 	if cfg.userID == "" {
@@ -66,7 +69,6 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT)
 	defer cancel()
 
-	logger := gokitlog.NewNopLogger()
 	bkt, err := bucket.NewClient(ctx, cfg.bucket, "bucket", logger, nil)
 	if err != nil {
 		log.Fatalln("failed to create bucket:", err)
@@ -86,6 +88,7 @@ func main() {
 }
 
 // nolint:errcheck
+//
 //goland:noinspection GoUnhandledErrorResult
 func printMetas(metas map[ulid.ULID]*metadata.Meta, deletedTimes map[ulid.ULID]time.Time, cfg config) {
 	blocks := listblocks.SortBlocks(metas)
@@ -113,8 +116,13 @@ func printMetas(metas map[ulid.ULID]*metadata.Meta, deletedTimes map[ulid.ULID]t
 	if cfg.showBlockSize {
 		fmt.Fprintf(tabber, "Size\t")
 	}
+	if cfg.showStats {
+		fmt.Fprintf(tabber, "Series\t")
+		fmt.Fprintf(tabber, "Samples\t")
+		fmt.Fprintf(tabber, "Chunks\t")
+	}
 	if cfg.showLabels {
-		fmt.Fprintf(tabber, "Labels (excl. "+tsdb.TenantIDExternalLabel+")\t")
+		fmt.Fprintf(tabber, "Labels\t")
 	}
 	if cfg.showSources {
 		fmt.Fprintf(tabber, "Sources\t")
@@ -163,9 +171,15 @@ func printMetas(metas map[ulid.ULID]*metadata.Meta, deletedTimes map[ulid.ULID]t
 			fmt.Fprintf(tabber, "%s\t", listblocks.GetFormattedBlockSize(b))
 		}
 
+		if cfg.showStats {
+			fmt.Fprintf(tabber, "%d\t", b.Stats.NumSeries)
+			fmt.Fprintf(tabber, "%d\t", b.Stats.NumSamples)
+			fmt.Fprintf(tabber, "%d\t", b.Stats.NumChunks)
+		}
+
 		if cfg.showLabels {
 			if m := b.Thanos.Labels; m != nil {
-				fmt.Fprintf(tabber, "%s\t", labels.FromMap(b.Thanos.Labels).WithoutLabels(tsdb.TenantIDExternalLabel))
+				fmt.Fprintf(tabber, "%s\t", labels.FromMap(b.Thanos.Labels))
 			} else {
 				fmt.Fprintf(tabber, "\t")
 			}

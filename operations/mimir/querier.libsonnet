@@ -2,6 +2,7 @@
   local container = $.core.v1.container,
 
   querier_args::
+    $._config.usageStatsConfig +
     $._config.grpcConfig +
     $._config.storageConfig +
     $._config.blocksStorageConfig +
@@ -9,6 +10,7 @@
     $._config.queryEngineConfig +
     $._config.ingesterRingClientConfig +
     $._config.queryBlocksStorageConfig +
+    $._config.querySchedulerRingClientConfig +
     $.blocks_metadata_caching_config +
     $.bucket_index_config
     {
@@ -54,17 +56,17 @@
 
   newQuerierDeployment(name, container)::
     deployment.new(name, $._config.querier.replicas, [container]) +
-    (if $._config.querier_allow_multiple_replicas_on_same_node then {} else $.util.antiAffinity) +
-    $.util.configVolumeMount($._config.overrides_configmap, $._config.overrides_configmap_mountpoint) +
+    $.newMimirSpreadTopology(name, $._config.querier_topology_spread_max_skew) +
+    $.mimirVolumeMounts +
     (if !std.isObject($._config.node_selector) then {} else deployment.mixin.spec.template.spec.withNodeSelectorMixin($._config.node_selector)) +
     deployment.mixin.spec.strategy.rollingUpdate.withMaxSurge(5) +
     deployment.mixin.spec.strategy.rollingUpdate.withMaxUnavailable(1),
 
-  querier_deployment:
+  querier_deployment: if !$._config.is_microservices_deployment_mode then null else
     self.newQuerierDeployment('querier', $.querier_container),
 
   local service = $.core.v1.service,
 
-  querier_service:
+  querier_service: if !$._config.is_microservices_deployment_mode then null else
     $.util.serviceFor($.querier_deployment, $._config.service_ignored_labels),
 }

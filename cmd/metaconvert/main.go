@@ -14,18 +14,19 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"sort"
 	"syscall"
 
 	gklog "github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 	"github.com/weaveworks/common/logging"
 
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 	"github.com/grafana/mimir/pkg/util/log"
 )
 
@@ -41,8 +42,9 @@ func main() {
 	cfg := config{}
 
 	cfg.LogLevel.RegisterFlags(flag.CommandLine)
+	initLogger := log.NewDefaultLogger(cfg.LogLevel, cfg.LogFormat)
 	cfg.LogFormat.RegisterFlags(flag.CommandLine)
-	cfg.BucketConfig.RegisterFlags(flag.CommandLine)
+	cfg.BucketConfig.RegisterFlags(flag.CommandLine, initLogger)
 
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Don't make changes; only report what needs to be done")
 	flag.StringVar(&cfg.Tenant, "tenant", "", "Tenant to process")
@@ -106,20 +108,20 @@ func convertTenantBlocks(ctx context.Context, userBucketClient objstore.Bucket, 
 
 		updated := false
 
-		metaOrgID := meta.Thanos.Labels[mimir_tsdb.TenantIDExternalLabel]
-		if metaOrgID != tenant {
-			level.Warn(logger).Log("msg", "updating tenant label", "block", blockID.String(), "old_value", metaOrgID, "new_value", tenant)
-			updated = true
-			meta.Thanos.Labels[mimir_tsdb.TenantIDExternalLabel] = tenant
+		// Sort labels before processing to have stable output for testing.
+		var labels []string
+		for l := range meta.Thanos.Labels {
+			labels = append(labels, l)
 		}
+		sort.Strings(labels)
 
-		for l, v := range meta.Thanos.Labels {
+		for _, l := range labels {
 			switch l {
-			case mimir_tsdb.TenantIDExternalLabel, mimir_tsdb.IngesterIDExternalLabel, mimir_tsdb.CompactorShardIDExternalLabel:
+			case mimir_tsdb.CompactorShardIDExternalLabel:
 				continue
 			}
 
-			level.Warn(logger).Log("msg", "removing unknown label", "block", blockID.String(), "label", l, "value", v)
+			level.Warn(logger).Log("msg", "removing unknown label", "block", blockID.String(), "label", l, "value", meta.Thanos.Labels[l])
 			updated = true
 			delete(meta.Thanos.Labels, l)
 		}

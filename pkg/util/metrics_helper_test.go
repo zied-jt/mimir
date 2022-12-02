@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
-	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
-	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 )
 
@@ -155,17 +153,14 @@ func makeLabels(namesAndValues ...string) []*dto.LabelPair {
 // TestSendSumOfGaugesPerUserWithLabels tests to ensure multiple metrics for the same user with a matching label are
 // summed correctly
 func TestSendSumOfGaugesPerUserWithLabels(t *testing.T) {
-	user1Metric := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
-	user2Metric := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
+	user1Reg := prometheus.NewRegistry()
+	user2Reg := prometheus.NewRegistry()
+	user1Metric := promauto.With(user1Reg).NewGaugeVec(prometheus.GaugeOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
+	user2Metric := promauto.With(user2Reg).NewGaugeVec(prometheus.GaugeOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
 	user1Metric.WithLabelValues("a", "b").Set(100)
 	user1Metric.WithLabelValues("a", "c").Set(80)
 	user2Metric.WithLabelValues("a", "b").Set(60)
 	user2Metric.WithLabelValues("a", "c").Set(40)
-
-	user1Reg := prometheus.NewRegistry()
-	user2Reg := prometheus.NewRegistry()
-	user1Reg.MustRegister(user1Metric)
-	user2Reg.MustRegister(user2Metric)
 
 	regs := NewUserRegistries()
 	regs.AddUserRegistry("user-1", user1Reg)
@@ -249,17 +244,14 @@ func TestSendMaxOfGauges(t *testing.T) {
 
 func TestSendSumOfHistogramsWithLabels(t *testing.T) {
 	buckets := []float64{1, 2, 3}
-	user1Metric := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_metric", Buckets: buckets}, []string{"label_one", "label_two"})
-	user2Metric := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_metric", Buckets: buckets}, []string{"label_one", "label_two"})
+	user1Reg := prometheus.NewRegistry()
+	user2Reg := prometheus.NewRegistry()
+	user1Metric := promauto.With(user1Reg).NewHistogramVec(prometheus.HistogramOpts{Name: "test_metric", Buckets: buckets}, []string{"label_one", "label_two"})
+	user2Metric := promauto.With(user2Reg).NewHistogramVec(prometheus.HistogramOpts{Name: "test_metric", Buckets: buckets}, []string{"label_one", "label_two"})
 	user1Metric.WithLabelValues("a", "b").Observe(1)
 	user1Metric.WithLabelValues("a", "c").Observe(2)
 	user2Metric.WithLabelValues("a", "b").Observe(3)
 	user2Metric.WithLabelValues("a", "c").Observe(4)
-
-	user1Reg := prometheus.NewRegistry()
-	user2Reg := prometheus.NewRegistry()
-	user1Reg.MustRegister(user1Metric)
-	user2Reg.MustRegister(user2Metric)
 
 	regs := NewUserRegistries()
 	regs.AddUserRegistry("user-1", user1Reg)
@@ -325,22 +317,18 @@ func TestSendSumOfHistogramsWithLabels(t *testing.T) {
 // TestSendSumOfCountersPerUser_WithLabels tests to ensure multiple metrics for the same user with a matching label are
 // summed correctly
 func TestSendSumOfCountersPerUser_WithLabels(t *testing.T) {
-	user1Metric := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
-	user2Metric := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
-	user3Metric := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
+	user1Reg := prometheus.NewRegistry()
+	user2Reg := prometheus.NewRegistry()
+	user3Reg := prometheus.NewRegistry()
+	user1Metric := promauto.With(user1Reg).NewCounterVec(prometheus.CounterOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
+	user2Metric := promauto.With(user2Reg).NewCounterVec(prometheus.CounterOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
+	user3Metric := promauto.With(user3Reg).NewCounterVec(prometheus.CounterOpts{Name: "test_metric"}, []string{"label_one", "label_two"})
 	user1Metric.WithLabelValues("a", "b").Add(100)
 	user1Metric.WithLabelValues("a", "c").Add(80)
 	user2Metric.WithLabelValues("a", "b").Add(60)
 	user2Metric.WithLabelValues("a", "c").Add(0)
 	user3Metric.WithLabelValues("a", "b").Add(0)
 	user3Metric.WithLabelValues("a", "c").Add(0)
-
-	user1Reg := prometheus.NewRegistry()
-	user2Reg := prometheus.NewRegistry()
-	user3Reg := prometheus.NewRegistry()
-	user1Reg.MustRegister(user1Metric)
-	user2Reg.MustRegister(user2Metric)
-	user3Reg.MustRegister(user3Metric)
 
 	regs := NewUserRegistries()
 	regs.AddUserRegistry("user-1", user1Reg)
@@ -434,19 +422,16 @@ func TestSendSumOfCountersPerUser_WithLabels(t *testing.T) {
 
 func TestSendSumOfSummariesPerUser(t *testing.T) {
 	objectives := map[float64]float64{0.25: 25, 0.5: 50, 0.75: 75}
-	user1Metric := prometheus.NewSummary(prometheus.SummaryOpts{Name: "test_metric", Objectives: objectives})
-	user2Metric := prometheus.NewSummary(prometheus.SummaryOpts{Name: "test_metric", Objectives: objectives})
+	user1Reg := prometheus.NewRegistry()
+	user2Reg := prometheus.NewRegistry()
+	user1Metric := promauto.With(user1Reg).NewSummary(prometheus.SummaryOpts{Name: "test_metric", Objectives: objectives})
+	user2Metric := promauto.With(user2Reg).NewSummary(prometheus.SummaryOpts{Name: "test_metric", Objectives: objectives})
 	user1Metric.Observe(25)
 	user1Metric.Observe(50)
 	user1Metric.Observe(75)
 	user2Metric.Observe(25)
 	user2Metric.Observe(50)
 	user2Metric.Observe(76)
-
-	user1Reg := prometheus.NewRegistry()
-	user2Reg := prometheus.NewRegistry()
-	user1Reg.MustRegister(user1Metric)
-	user2Reg.MustRegister(user2Metric)
 
 	regs := NewUserRegistries()
 	regs.AddUserRegistry("user-1", user1Reg)
@@ -1091,124 +1076,4 @@ func float64p(v float64) *float64 {
 
 func uint64p(v uint64) *uint64 {
 	return &v
-}
-
-func BenchmarkGetLabels_SmallSet(b *testing.B) {
-	m := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "test",
-		ConstLabels: map[string]string{
-			"cluster": "abc",
-		},
-	}, []string{"reason", "user"})
-
-	m.WithLabelValues("bad", "user1").Inc()
-	m.WithLabelValues("worse", "user1").Inc()
-	m.WithLabelValues("worst", "user1").Inc()
-
-	m.WithLabelValues("bad", "user2").Inc()
-	m.WithLabelValues("worst", "user2").Inc()
-
-	m.WithLabelValues("worst", "user3").Inc()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := GetLabels(m, map[string]string{"user": "user1", "reason": "worse"}); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkGetLabels_MediumSet(b *testing.B) {
-	m := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "test",
-		ConstLabels: map[string]string{
-			"cluster": "abc",
-		},
-	}, []string{"reason", "user"})
-
-	for i := 1; i <= 1000; i++ {
-		m.WithLabelValues("bad", fmt.Sprintf("user%d", i)).Inc()
-		m.WithLabelValues("worse", fmt.Sprintf("user%d", i)).Inc()
-		m.WithLabelValues("worst", fmt.Sprintf("user%d", i)).Inc()
-
-		if i%2 == 0 {
-			m.WithLabelValues("bad", fmt.Sprintf("user%d", i)).Inc()
-			m.WithLabelValues("worst", fmt.Sprintf("user%d", i)).Inc()
-		} else {
-			m.WithLabelValues("worst", fmt.Sprintf("user%d", i)).Inc()
-		}
-	}
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		if _, err := GetLabels(m, map[string]string{"user": "user1", "reason": "worse"}); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func TestGetLabels(t *testing.T) {
-	m := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "test",
-		ConstLabels: map[string]string{
-			"cluster": "abc",
-		},
-	}, []string{"reason", "user"})
-
-	m.WithLabelValues("bad", "user1").Inc()
-	m.WithLabelValues("worse", "user1").Inc()
-	m.WithLabelValues("worst", "user1").Inc()
-
-	m.WithLabelValues("bad", "user2").Inc()
-	m.WithLabelValues("worst", "user2").Inc()
-
-	m.WithLabelValues("worst", "user3").Inc()
-
-	verifyLabels(t, m, nil, []labels.Labels{
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worse", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user2"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user2"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user3"}),
-	})
-
-	verifyLabels(t, m, map[string]string{"cluster": "abc"}, []labels.Labels{
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worse", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user2"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user2"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user3"}),
-	})
-
-	verifyLabels(t, m, map[string]string{"reason": "bad"}, []labels.Labels{
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user2"}),
-	})
-
-	verifyLabels(t, m, map[string]string{"user": "user1"}, []labels.Labels{
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "bad", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worse", "user": "user1"}),
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worst", "user": "user1"}),
-	})
-
-	verifyLabels(t, m, map[string]string{"user": "user1", "reason": "worse"}, []labels.Labels{
-		labels.FromMap(map[string]string{"cluster": "abc", "reason": "worse", "user": "user1"}),
-	})
-}
-
-func verifyLabels(t *testing.T, m prometheus.Collector, filter map[string]string, expectedLabels []labels.Labels) {
-	result, err := GetLabels(m, filter)
-	require.NoError(t, err)
-
-	sort.Slice(result, func(i, j int) bool {
-		return labels.Compare(result[i], result[j]) < 0
-	})
-
-	sort.Slice(expectedLabels, func(i, j int) bool {
-		return labels.Compare(expectedLabels[i], expectedLabels[j]) < 0
-	})
-
-	require.Equal(t, expectedLabels, result)
 }

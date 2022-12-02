@@ -6,6 +6,7 @@ metadata:
     {{- include "mimir.labels" (dict "ctx" . "component" "compactor" "memberlist" true) | nindent 4 }}
   annotations:
     {{- toYaml .Values.compactor.annotations | nindent 4 }}
+  namespace: {{ .Release.Namespace | quote }}
 spec:
   replicas: {{ .Values.compactor.replicas }}
   selector:
@@ -31,7 +32,7 @@ spec:
         {{- end }}
         {{- end }}
         accessModes:
-          {{ toYaml .Values.compactor.persistentVolume.accessModes | nindent 10 }}
+          {{- toYaml .Values.compactor.persistentVolume.accessModes | nindent 10 }}
         resources:
           requests:
             storage: "{{ .Values.compactor.persistentVolume.size }}"
@@ -40,19 +41,13 @@ spec:
     metadata:
       labels:
         {{- include "mimir.podLabels" (dict "ctx" . "component" "compactor" "memberlist" true) | nindent 8 }}
-        {{- with .Values.compactor.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       annotations:
-        {{- if .Values.useExternalConfig }}
-        checksum/config: {{ .Values.externalConfigVersion }}
-        {{- else }}
-        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- end }}
-        {{- with .Values.compactor.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "mimir.podAnnotations" (dict "ctx" . "component" "compactor") | nindent 8 }}
+      namespace: {{ .Release.Namespace | quote }}
     spec:
+      {{- with .Values.compactor.schedulerName }}
+      schedulerName: {{ . | quote }}
+      {{- end }}
       serviceAccountName: {{ template "mimir.serviceAccountName" . }}
       {{- if .Values.compactor.priorityClassName }}
       priorityClassName: {{ .Values.compactor.priorityClassName }}
@@ -71,13 +66,14 @@ spec:
         {{- toYaml .Values.compactor.nodeSelector | nindent 8 }}
       affinity:
         {{- toYaml .Values.compactor.affinity | nindent 8 }}
+      topologySpreadConstraints:
+        {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" . "component" "compactor") | nindent 8 }}
       tolerations:
         {{- toYaml .Values.compactor.tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.compactor.terminationGracePeriodSeconds }}
       volumes:
         - name: config
-          secret:
-            secretName: {{ tpl .Values.externalConfigSecretName . }}
+          {{- include "mimir.configVolume" . | nindent 10 }}
         {{- if .Values.enterprise.enabled }}
         - name: license
           secret:
@@ -93,6 +89,8 @@ spec:
         {{- if .Values.compactor.extraVolumes }}
         {{ toYaml .Values.compactor.extraVolumes | nindent 8 }}
         {{- end }}
+        - name: active-queries
+          emptyDir: {}
       containers:
         {{- if .Values.compactor.extraContainers }}
         {{ toYaml .Values.compactor.extraContainers | nindent 8 }}
@@ -102,6 +100,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "-target=compactor"
+            - "-config.expand-env=true"
             - "-config.file=/etc/mimir/mimir.yaml"
             {{- range $key, $value := .Values.compactor.extraArgs }}
             - "-{{ $key }}={{ $value }}"
@@ -123,6 +122,8 @@ spec:
               {{- if .Values.compactor.persistentVolume.subPath }}
               subPath: {{ .Values.compactor.persistentVolume.subPath }}
               {{- end }}
+            - name: active-queries
+              mountPath: /active-query-tracker
           ports:
             - name: http-metrics
               containerPort: {{ include "mimir.serverHttpListenPort" . }}
@@ -140,8 +141,18 @@ spec:
           resources:
             {{- toYaml .Values.compactor.resources | nindent 12 }}
           securityContext:
-            readOnlyRootFilesystem: true
+            {{- toYaml .Values.compactor.containerSecurityContext | nindent 12 }}
           env:
-            {{- if .Values.compactor.env }}
-              {{- toYaml .Values.compactor.env | nindent 12 }}
+            {{- with .Values.global.extraEnv }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.compactor.env }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- with .Values.global.extraEnvFrom }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.compactor.extraEnvFrom }}
+              {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -16,11 +16,9 @@ package wal
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +27,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/exp/slices"
 
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/tsdb/record"
@@ -145,7 +144,7 @@ func NewWatcherMetrics(reg prometheus.Registerer) *WatcherMetrics {
 }
 
 // NewWatcher creates a new WAL watcher for a given WriteTo.
-func NewWatcher(metrics *WatcherMetrics, readerMetrics *LiveReaderMetrics, logger log.Logger, name string, writer WriteTo, walDir string, sendExemplars bool) *Watcher {
+func NewWatcher(metrics *WatcherMetrics, readerMetrics *LiveReaderMetrics, logger log.Logger, name string, writer WriteTo, dir string, sendExemplars bool) *Watcher {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -154,7 +153,7 @@ func NewWatcher(metrics *WatcherMetrics, readerMetrics *LiveReaderMetrics, logge
 		writer:        writer,
 		metrics:       metrics,
 		readerMetrics: readerMetrics,
-		walDir:        path.Join(walDir, "wal"),
+		walDir:        path.Join(dir, "wal"),
 		name:          name,
 		sendExemplars: sendExemplars,
 
@@ -305,7 +304,7 @@ func (w *Watcher) firstAndLast() (int, int, error) {
 // Copied from tsdb/wal/wal.go so we do not have to open a WAL.
 // Plan is to move WAL watcher to TSDB and dedupe these implementations.
 func (w *Watcher) segments(dir string) ([]int, error) {
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +317,7 @@ func (w *Watcher) segments(dir string) ([]int, error) {
 		}
 		refs = append(refs, k)
 	}
-	sort.Ints(refs)
+	slices.Sort(refs)
 	for i := 0; i < len(refs)-1; i++ {
 		if refs[i]+1 != refs[i+1] {
 			return nil, errors.New("segments are not sequential")
@@ -482,7 +481,7 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 	)
 	for r.Next() && !isClosed(w.quit) {
 		rec := r.Record()
-		w.recordsReadMetric.WithLabelValues(recordType(dec.Type(rec))).Inc()
+		w.recordsReadMetric.WithLabelValues(dec.Type(rec).String()).Inc()
 
 		switch dec.Type(rec) {
 		case record.Series:
@@ -555,7 +554,7 @@ func (w *Watcher) readSegmentForGC(r *LiveReader, segmentNum int, _ bool) error 
 	)
 	for r.Next() && !isClosed(w.quit) {
 		rec := r.Record()
-		w.recordsReadMetric.WithLabelValues(recordType(dec.Type(rec))).Inc()
+		w.recordsReadMetric.WithLabelValues(dec.Type(rec).String()).Inc()
 
 		switch dec.Type(rec) {
 		case record.Series:
@@ -582,19 +581,6 @@ func (w *Watcher) readSegmentForGC(r *LiveReader, segmentNum int, _ bool) error 
 func (w *Watcher) SetStartTime(t time.Time) {
 	w.startTime = t
 	w.startTimestamp = timestamp.FromTime(t)
-}
-
-func recordType(rt record.Type) string {
-	switch rt {
-	case record.Series:
-		return "series"
-	case record.Samples:
-		return "samples"
-	case record.Tombstones:
-		return "tombstones"
-	default:
-		return "unknown"
-	}
 }
 
 type segmentReadFn func(w *Watcher, r *LiveReader, segmentNum int, tail bool) error

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -27,10 +26,10 @@ import (
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/rulefmt"
-	"github.com/prometheus/prometheus/prompb"
+	"github.com/prometheus/prometheus/prompb" // OTLP protos are not compatible with gogo
 	yaml "gopkg.in/yaml.v3"
 
-	"github.com/grafana/mimir/pkg/ruler"
+	"github.com/grafana/mimir/pkg/util/push"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -113,6 +112,37 @@ func (c *Client) Push(timeseries []prompb.TimeSeries) (*http.Response, error) {
 	req.Header.Add("Content-Encoding", "snappy")
 	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+	req.Header.Set("X-Scope-OrgID", c.orgID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	// Execute HTTP request
+	res, err := c.httpClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	defer res.Body.Close()
+	return res, nil
+}
+
+// PushOTLP the input timeseries to the remote endpoint in OTLP format
+func (c *Client) PushOTLP(timeseries []prompb.TimeSeries) (*http.Response, error) {
+	// Create write request
+	otlpRequest := push.TimeseriesToOTLPRequest(timeseries)
+
+	data, err := otlpRequest.MarshalProto()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/otlp/v1/metrics", c.distributorAddress), bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set("X-Scope-OrgID", c.orgID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
@@ -266,7 +296,7 @@ type ServerStatus struct {
 }
 
 // GetPrometheusRules fetches the rules from the Prometheus endpoint /api/v1/rules.
-func (c *Client) GetPrometheusRules() ([]*ruler.RuleGroup, error) {
+func (c *Client) GetPrometheusRules() ([]*promv1.RuleGroup, error) {
 	// Create HTTP request
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/prometheus/api/v1/rules", c.rulerAddress), nil)
 	if err != nil {
@@ -284,15 +314,17 @@ func (c *Client) GetPrometheusRules() ([]*ruler.RuleGroup, error) {
 	}
 	defer res.Body.Close()
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	// Decode the response.
 	type response struct {
-		Status string              `json:"status"`
-		Data   ruler.RuleDiscovery `json:"data"`
+		Status string `json:"status"`
+		Data   struct {
+			RuleGroups []*promv1.RuleGroup `json:"groups"`
+		} `json:"data"`
 	}
 
 	decoded := &response{}
@@ -310,7 +342,7 @@ func (c *Client) GetPrometheusRules() ([]*ruler.RuleGroup, error) {
 // GetRuleGroups gets the configured rule groups from the ruler.
 func (c *Client) GetRuleGroups() (map[string][]rulefmt.RuleGroup, error) {
 	// Create HTTP request
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/api/v1/rules", c.rulerAddress), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/prometheus/config/v1/rules", c.rulerAddress), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +360,7 @@ func (c *Client) GetRuleGroups() (map[string][]rulefmt.RuleGroup, error) {
 	defer res.Body.Close()
 	rgs := map[string][]rulefmt.RuleGroup{}
 
-	data, err := ioutil.ReadAll(res.Body)
+	data, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +382,7 @@ func (c *Client) SetRuleGroup(rulegroup rulefmt.RuleGroup, namespace string) err
 	}
 
 	// Create HTTP request
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/v1/rules/%s", c.rulerAddress, url.PathEscape(namespace)), bytes.NewReader(data))
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/prometheus/config/v1/rules/%s", c.rulerAddress, url.PathEscape(namespace)), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -379,7 +411,7 @@ func (c *Client) SetRuleGroup(rulegroup rulefmt.RuleGroup, namespace string) err
 // GetRuleGroup gets a rule group.
 func (c *Client) GetRuleGroup(namespace string, groupName string) (*http.Response, error) {
 	// Create HTTP request
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/api/v1/rules/%s/%s", c.rulerAddress, url.PathEscape(namespace), url.PathEscape(groupName)), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/prometheus/config/v1/rules/%s/%s", c.rulerAddress, url.PathEscape(namespace), url.PathEscape(groupName)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +429,7 @@ func (c *Client) GetRuleGroup(namespace string, groupName string) (*http.Respons
 // DeleteRuleGroup deletes a rule group.
 func (c *Client) DeleteRuleGroup(namespace string, groupName string) error {
 	// Create HTTP request
-	req, err := http.NewRequest("DELETE", fmt.Sprintf("http://%s/api/v1/rules/%s/%s", c.rulerAddress, url.PathEscape(namespace), url.PathEscape(groupName)), nil)
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("http://%s/prometheus/config/v1/rules/%s/%s", c.rulerAddress, url.PathEscape(namespace), url.PathEscape(groupName)), nil)
 	if err != nil {
 		return err
 	}
@@ -421,7 +453,7 @@ func (c *Client) DeleteRuleGroup(namespace string, groupName string) error {
 // DeleteRuleNamespace deletes all the rule groups (and the namespace itself).
 func (c *Client) DeleteRuleNamespace(namespace string) error {
 	// Create HTTP request
-	req, err := http.NewRequest("DELETE", fmt.Sprintf("http://%s/api/v1/rules/%s", c.rulerAddress, url.PathEscape(namespace)), nil)
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("http://%s/prometheus/config/v1/rules/%s", c.rulerAddress, url.PathEscape(namespace)), nil)
 	if err != nil {
 		return err
 	}
@@ -462,7 +494,7 @@ func (c *Client) getRawPage(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	content, err := ioutil.ReadAll(resp.Body)
+	content, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -978,7 +1010,7 @@ func (c *Client) DoGetBody(url string) (*http.Response, []byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, err
 	}

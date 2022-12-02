@@ -1,30 +1,24 @@
 apiVersion: v2
-version: 2.0.14
-appVersion: 2.0.0
+version: 4.0.0-weekly.214
+appVersion: r214
 description: "Grafana Mimir"
-engine: gotpl
-home: https://grafana.com/docs/mimir/v2.0.x/
+home: https://grafana.com/docs/mimir/v2.4.x/
 icon: https://grafana.com/static/img/logos/logo-mimir.svg
-kubeVersion: ^1.10.0-0
-name: mimir-distributed-beta
+kubeVersion: ^1.20.0-0
+name: mimir-distributed
 dependencies:
-  - name: memcached
-    alias: memcached
-    version: 5.5.2
-    repository: https://charts.bitnami.com/bitnami
-    condition: memcached.enabled
-  - name: memcached
-    alias: memcached-queries
-    version: 5.5.2
-    repository: https://charts.bitnami.com/bitnami
-    condition: memcached-queries.enabled
-  - name: memcached
-    alias: memcached-metadata
-    version: 5.5.2
-    repository: https://charts.bitnami.com/bitnami
-    condition: memcached-metadata.enabled
   - name: minio
     alias: minio
-    version: 8.0.10
-    repository: https://helm.min.io/
+    version: 5.0.0
+    repository: https://charts.min.io/
     condition: minio.enabled
+  - name: grafana-agent-operator
+    alias: grafana-agent-operator
+    version: 0.2.8
+    repository: https://grafana.github.io/helm-charts
+    condition: metaMonitoring.grafanaAgent.installOperator
+  - name: rollout-operator
+    alias: rollout_operator
+    repository: https://grafana.github.io/helm-charts
+    version: 0.1.2
+    condition: rollout_operator.enabled

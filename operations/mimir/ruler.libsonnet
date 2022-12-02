@@ -2,13 +2,14 @@
   local container = $.core.v1.container,
 
   ruler_args::
+    $._config.usageStatsConfig +
     $._config.grpcConfig +
     $._config.storageConfig +
     $._config.blocksStorageConfig +
+    $._config.rulerStorageConfig +
     $._config.queryConfig +
     $._config.queryEngineConfig +
     $._config.ingesterRingClientConfig +
-    $._config.rulerClientConfig +
     $._config.rulerLimitsConfig +
     $._config.queryBlocksStorageConfig +
     $.blocks_metadata_caching_config +
@@ -42,21 +43,17 @@
 
   local deployment = $.apps.v1.deployment,
 
-  ruler_deployment:
-    if $._config.ruler_enabled then
-      deployment.new('ruler', 2, [$.ruler_container]) +
-      (if !std.isObject($._config.node_selector) then {} else deployment.mixin.spec.template.spec.withNodeSelectorMixin($._config.node_selector)) +
-      deployment.mixin.spec.strategy.rollingUpdate.withMaxSurge(0) +
-      deployment.mixin.spec.strategy.rollingUpdate.withMaxUnavailable(1) +
-      deployment.mixin.spec.template.spec.withTerminationGracePeriodSeconds(600) +
-      (if $._config.ruler_allow_multiple_replicas_on_same_node then {} else $.util.antiAffinity) +
-      $.util.configVolumeMount($._config.overrides_configmap, $._config.overrides_configmap_mountpoint)
-    else {},
+  ruler_deployment: if !$._config.is_microservices_deployment_mode || !$._config.ruler_enabled then null else
+    local name = 'ruler';
 
-  local service = $.core.v1.service,
+    deployment.new(name, 2, [$.ruler_container]) +
+    (if !std.isObject($._config.node_selector) then {} else deployment.mixin.spec.template.spec.withNodeSelectorMixin($._config.node_selector)) +
+    deployment.mixin.spec.strategy.rollingUpdate.withMaxSurge(0) +
+    deployment.mixin.spec.strategy.rollingUpdate.withMaxUnavailable(1) +
+    deployment.mixin.spec.template.spec.withTerminationGracePeriodSeconds(600) +
+    $.newMimirSpreadTopology(name, $._config.querier_topology_spread_max_skew) +
+    $.mimirVolumeMounts,
 
-  ruler_service:
-    if $._config.ruler_enabled then
-      $.util.serviceFor($.ruler_deployment, $._config.service_ignored_labels)
-    else {},
+  ruler_service: if !$._config.is_microservices_deployment_mode || !$._config.ruler_enabled then null else
+    $.util.serviceFor($.ruler_deployment, $._config.service_ignored_labels),
 }

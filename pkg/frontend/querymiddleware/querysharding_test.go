@@ -60,6 +60,14 @@ func mockHandlerWith(resp *PrometheusResponse, err error) Handler {
 	})
 }
 
+func sampleStreamsStrings(ss []SampleStream) []string {
+	strs := make([]string, len(ss))
+	for i := range ss {
+		strs[i] = mimirpb.FromLabelAdaptersToMetric(ss[i].Labels).String()
+	}
+	return strs
+}
+
 // approximatelyEquals ensures two responses are approximately equal, up to 6 decimals precision per sample
 func approximatelyEquals(t *testing.T, a, b *PrometheusResponse) {
 	// Ensure both queries succeeded.
@@ -71,7 +79,7 @@ func approximatelyEquals(t *testing.T, a, b *PrometheusResponse) {
 	bs, err := responseToSamples(b)
 	require.Nil(t, err)
 
-	require.Equal(t, len(as), len(bs), "expected same number of series")
+	require.Equalf(t, len(as), len(bs), "expected same number of series: one contains %v, other %v", sampleStreamsStrings(as), sampleStreamsStrings(bs))
 
 	for i := 0; i < len(as); i++ {
 		a := as[i]
@@ -125,6 +133,14 @@ func TestQueryShardingCorrectness(t *testing.T) {
 	}{
 		"sum() no grouping": {
 			query:                  `sum(metric_counter)`,
+			expectedShardedQueries: 1,
+		},
+		"sum() offset": {
+			query:                  `sum(metric_counter offset 5s)`,
+			expectedShardedQueries: 1,
+		},
+		"sum() negative offset": {
+			query:                  `sum(metric_counter offset -5s)`,
 			expectedShardedQueries: 1,
 		},
 		"sum() grouping 'by'": {
@@ -249,14 +265,14 @@ func TestQueryShardingCorrectness(t *testing.T) {
 				avg(rate(metric_counter[1m]))`,
 			expectedShardedQueries: 3, // avg() is parallelized as sum()/count().
 		},
-		"sum by(unique) on (unique) group_left (group_1) * avg by (unique, group_1)": {
+		"sum by(unique) * on (unique) group_left (group_1) avg by (unique, group_1)": {
 			// ensure that avg transformation into sum/count does not break label matching in previous binop.
 			query: `
-				metric_counter
+				sum by(unique) (metric_counter)
 				*
 				on (unique) group_left (group_1) 
 				avg by (unique, group_1) (metric_counter)`,
-			expectedShardedQueries: 2,
+			expectedShardedQueries: 3,
 		},
 		"sum by (rate()) / 2 ^ 2": {
 			query: `
@@ -324,6 +340,10 @@ func TestQueryShardingCorrectness(t *testing.T) {
 			query:                  `sum by (group_1)(rate(metric_counter[1h] @ end() offset 1m))`,
 			expectedShardedQueries: 1,
 		},
+		"@ modifier and negative offset": {
+			query:                  `sum by (group_1)(rate(metric_counter[1h] @ start() offset -1m))`,
+			expectedShardedQueries: 1,
+		},
 		"label_replace": {
 			query: `sum by (foo)(
 					 	label_replace(
@@ -372,8 +392,8 @@ func TestQueryShardingCorrectness(t *testing.T) {
 			expectedShardedQueries: 1,
 		},
 		`filtering binary operation with non constant`: {
-			query:                  `max_over_time(metric_counter[5m]) > scalar(min(metric_counter))`,
-			expectedShardedQueries: 1, // scalar on the right should be sharded, but not the binary op itself, hence 1
+			query:                  `max by(unique) (max_over_time(metric_counter[5m])) > scalar(min(metric_counter))`,
+			expectedShardedQueries: 2,
 		},
 		//
 		// The following queries are not expected to be shardable.
@@ -446,6 +466,62 @@ func TestQueryShardingCorrectness(t *testing.T) {
 			query:                  `"test"`,
 			expectedShardedQueries: 0,
 			noRangeQuery:           true,
+		},
+		"day_of_month() >= 1 and day_of_month()": {
+			query:                  `day_of_month() >= 1 and day_of_month()`,
+			expectedShardedQueries: 0,
+		},
+		"month() >= 1 and month()": {
+			query:                  `month() >= 1 and month()`,
+			expectedShardedQueries: 0,
+		},
+		"vector(1) > 0 and vector(1)": {
+			query:                  `vector(1) > 0 and vector(1)`,
+			expectedShardedQueries: 0,
+		},
+		"sum(metric_counter) > 0 and vector(1)": {
+			query:                  `sum(metric_counter) > 0 and vector(1)`,
+			expectedShardedQueries: 1,
+		},
+		"vector(1)": {
+			query:                  `vector(1)`,
+			expectedShardedQueries: 0,
+		},
+		"time()": {
+			query:                  `time()`,
+			expectedShardedQueries: 0,
+		},
+		"month(sum(metric_counter))": {
+			query:                  `month(sum(metric_counter))`,
+			expectedShardedQueries: 1, // Sharded because the contents of `sum()` is sharded.
+		},
+		"month(sum(metric_counter)) > 0 and vector(1)": {
+			query:                  `month(sum(metric_counter)) > 0 and vector(1)`,
+			expectedShardedQueries: 1, // Sharded because the contents of `sum()` is sharded.
+		},
+		"0 < bool 1": {
+			query:                  `0 < bool 1`,
+			expectedShardedQueries: 0,
+		},
+		"scalar(metric_counter{const=\"fixed\"}) < bool 1": {
+			query:                  `scalar(metric_counter{const="fixed"}) < bool 1`,
+			expectedShardedQueries: 0,
+		},
+		"scalar(sum(metric_counter)) < bool 1": {
+			query:                  `scalar(sum(metric_counter)) < bool 1`,
+			expectedShardedQueries: 1,
+		},
+		`sum({__name__!=""})`: {
+			query:                  `sum({__name__!=""})`,
+			expectedShardedQueries: 1,
+		},
+		`sum by (group_1) ({__name__!=""})`: {
+			query:                  `sum by (group_1) ({__name__!=""})`,
+			expectedShardedQueries: 1,
+		},
+		`sum by (group_1) (count_over_time({__name__!=""}[1m]))`: {
+			query:                  `sum by (group_1) (count_over_time({__name__!=""}[1m]))`,
+			expectedShardedQueries: 1,
 		},
 	}
 
@@ -738,6 +814,7 @@ func TestQuerySharding_FunctionCorrectness(t *testing.T) {
 		{fn: "days_in_month"},
 		{fn: "day_of_month"},
 		{fn: "day_of_week"},
+		{fn: "day_of_year"},
 		{fn: "delta", rangeQuery: true},
 		{fn: "deriv", rangeQuery: true},
 		{fn: "exp"},
@@ -797,12 +874,12 @@ func TestQuerySharding_FunctionCorrectness(t *testing.T) {
 		for _, query := range mkQueries(tc.tpl, tc.fn, tc.rangeQuery, tc.args) {
 			t.Run(query, func(t *testing.T) {
 				queryable := storageSeriesQueryable([]*promql.StorageSeries{
-					newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}, {Name: "baz", Value: "blip"}, {Name: "bar", Value: "blop"}, {Name: "foo", Value: "barr"}}, start.Add(-lookbackDelta), end, step, factor(5)),
-					newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}, {Name: "baz", Value: "blip"}, {Name: "bar", Value: "blop"}, {Name: "foo", Value: "bazz"}}, start.Add(-lookbackDelta), end, step, factor(7)),
-					newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}, {Name: "baz", Value: "blip"}, {Name: "bar", Value: "blap"}, {Name: "foo", Value: "buzz"}}, start.Add(-lookbackDelta), end, step, factor(12)),
-					newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}, {Name: "baz", Value: "blip"}, {Name: "bar", Value: "blap"}, {Name: "foo", Value: "bozz"}}, start.Add(-lookbackDelta), end, step, factor(11)),
-					newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}, {Name: "baz", Value: "blip"}, {Name: "bar", Value: "blop"}, {Name: "foo", Value: "buzz"}}, start.Add(-lookbackDelta), end, step, factor(8)),
-					newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}, {Name: "baz", Value: "blip"}, {Name: "bar", Value: "blap"}, {Name: "foo", Value: "bazz"}}, start.Add(-lookbackDelta), end, step, arithmeticSequence(10)),
+					newSeries(labels.FromStrings("__name__", "bar1", "baz", "blip", "bar", "blop", "foo", "barr"), start.Add(-lookbackDelta), end, step, factor(5)),
+					newSeries(labels.FromStrings("__name__", "bar1", "baz", "blip", "bar", "blop", "foo", "bazz"), start.Add(-lookbackDelta), end, step, factor(7)),
+					newSeries(labels.FromStrings("__name__", "bar1", "baz", "blip", "bar", "blap", "foo", "buzz"), start.Add(-lookbackDelta), end, step, factor(12)),
+					newSeries(labels.FromStrings("__name__", "bar1", "baz", "blip", "bar", "blap", "foo", "bozz"), start.Add(-lookbackDelta), end, step, factor(11)),
+					newSeries(labels.FromStrings("__name__", "bar1", "baz", "blip", "bar", "blop", "foo", "buzz"), start.Add(-lookbackDelta), end, step, factor(8)),
+					newSeries(labels.FromStrings("__name__", "bar1", "baz", "blip", "bar", "blap", "foo", "bazz"), start.Add(-lookbackDelta), end, step, arithmeticSequence(10)),
 				})
 
 				req := &PrometheusRangeQueryRequest{
@@ -1116,25 +1193,27 @@ func TestQuerySharding_ShouldReturnErrorInCorrectFormat(t *testing.T) {
 	var (
 		engine        = newEngine()
 		engineTimeout = promql.NewEngine(promql.EngineOpts{
-			Logger:             log.NewNopLogger(),
-			Reg:                nil,
-			MaxSamples:         10e6,
-			Timeout:            50 * time.Millisecond,
-			ActiveQueryTracker: nil,
-			LookbackDelta:      lookbackDelta,
-			EnableAtModifier:   true,
+			Logger:               log.NewNopLogger(),
+			Reg:                  nil,
+			MaxSamples:           10e6,
+			Timeout:              50 * time.Millisecond,
+			ActiveQueryTracker:   nil,
+			LookbackDelta:        lookbackDelta,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
 			NoStepSubqueryIntervalFn: func(rangeMillis int64) int64 {
 				return int64(1 * time.Minute / (time.Millisecond / time.Nanosecond))
 			},
 		})
 		engineSampleLimit = promql.NewEngine(promql.EngineOpts{
-			Logger:             log.NewNopLogger(),
-			Reg:                nil,
-			MaxSamples:         1,
-			Timeout:            time.Hour,
-			ActiveQueryTracker: nil,
-			LookbackDelta:      lookbackDelta,
-			EnableAtModifier:   true,
+			Logger:               log.NewNopLogger(),
+			Reg:                  nil,
+			MaxSamples:           1,
+			Timeout:              time.Hour,
+			ActiveQueryTracker:   nil,
+			LookbackDelta:        lookbackDelta,
+			EnableAtModifier:     true,
+			EnableNegativeOffset: true,
 			NoStepSubqueryIntervalFn: func(rangeMillis int64) int64 {
 				return int64(1 * time.Minute / (time.Millisecond / time.Nanosecond))
 			},
@@ -1146,7 +1225,7 @@ func TestQuerySharding_ShouldReturnErrorInCorrectFormat(t *testing.T) {
 			return nil, apierror.Newf(apierror.TypeExec, "expanding series: %s", validation.NewMaxQueryLengthError(744*time.Hour, 720*time.Hour))
 		})
 		queryable = storageSeriesQueryable([]*promql.StorageSeries{
-			newSeries(labels.Labels{{Name: "__name__", Value: "bar1"}}, start.Add(-lookbackDelta), end, step, factor(5)),
+			newSeries(labels.FromStrings("__name__", "bar1"), start.Add(-lookbackDelta), end, step, factor(5)),
 		})
 		queryableSlow = newMockShardedQueryable(
 			2,
@@ -1343,10 +1422,12 @@ func BenchmarkQuerySharding(b *testing.B) {
 			time.Millisecond / 10,
 		} {
 			engine := promql.NewEngine(promql.EngineOpts{
-				Logger:     log.NewNopLogger(),
-				Reg:        nil,
-				MaxSamples: 100000000,
-				Timeout:    time.Minute,
+				Logger:               log.NewNopLogger(),
+				Reg:                  nil,
+				MaxSamples:           100000000,
+				Timeout:              time.Minute,
+				EnableNegativeOffset: true,
+				EnableAtModifier:     true,
 			})
 
 			queryable := newMockShardedQueryable(
@@ -1361,9 +1442,9 @@ func BenchmarkQuerySharding(b *testing.B) {
 			}
 
 			var (
-				start int64 = 0
-				end         = int64(1000 * tc.samplesPerSeries)
-				step        = (end - start) / 1000
+				start = int64(0)
+				end   = int64(1000 * tc.samplesPerSeries)
+				step  = (end - start) / 1000
 			)
 
 			req := &PrometheusRangeQueryRequest{
@@ -1462,18 +1543,12 @@ func TestPromqlResultToSampleStreams(t *testing.T) {
 			input: &promql.Result{
 				Value: promql.Vector{
 					promql.Sample{
-						Point: promql.Point{T: 1, V: 1},
-						Metric: labels.Labels{
-							{Name: "a", Value: "a1"},
-							{Name: "b", Value: "b1"},
-						},
+						Point:  promql.Point{T: 1, V: 1},
+						Metric: labels.FromStrings("a", "a1", "b", "b1"),
 					},
 					promql.Sample{
-						Point: promql.Point{T: 2, V: 2},
-						Metric: labels.Labels{
-							{Name: "a", Value: "a2"},
-							{Name: "b", Value: "b2"},
-						},
+						Point:  promql.Point{T: 2, V: 2},
+						Metric: labels.FromStrings("a", "a2", "b", "b2"),
 					},
 				},
 			},
@@ -1510,20 +1585,14 @@ func TestPromqlResultToSampleStreams(t *testing.T) {
 			input: &promql.Result{
 				Value: promql.Matrix{
 					{
-						Metric: labels.Labels{
-							{Name: "a", Value: "a1"},
-							{Name: "b", Value: "b1"},
-						},
+						Metric: labels.FromStrings("a", "a1", "b", "b1"),
 						Points: []promql.Point{
 							{T: 1, V: 1},
 							{T: 2, V: 2},
 						},
 					},
 					{
-						Metric: labels.Labels{
-							{Name: "a", Value: "a2"},
-							{Name: "b", Value: "b2"},
-						},
+						Metric: labels.FromStrings("a", "a2", "b", "b2"),
 						Points: []promql.Point{
 							{T: 1, V: 8},
 							{T: 2, V: 9},
@@ -1717,25 +1786,25 @@ func newSeries(metric labels.Labels, from, to time.Time, step time.Duration, gen
 
 // newTestCounterLabels generates series labels for a counter metric used in tests.
 func newTestCounterLabels(id int) labels.Labels {
-	return labels.Labels{
-		{Name: "__name__", Value: "metric_counter"},
-		{Name: "const", Value: "fixed"},                 // A constant label.
-		{Name: "unique", Value: strconv.Itoa(id)},       // A unique label.
-		{Name: "group_1", Value: strconv.Itoa(id % 10)}, // A first grouping label.
-		{Name: "group_2", Value: strconv.Itoa(id % 3)},  // A second grouping label.
-	}
+	return labels.FromStrings(
+		"__name__", "metric_counter",
+		"const", "fixed", // A constant label.
+		"unique", strconv.Itoa(id), // A unique label.
+		"group_1", strconv.Itoa(id%10), // A first grouping label.
+		"group_2", strconv.Itoa(id%3), // A second grouping label.
+	)
 }
 
 // newTestCounterLabels generates series labels for an histogram metric used in tests.
 func newTestHistogramLabels(id int, bucketLe float64) labels.Labels {
-	return labels.Labels{
-		{Name: "__name__", Value: "metric_histogram_bucket"},
-		{Name: "le", Value: fmt.Sprintf("%f", bucketLe)},
-		{Name: "const", Value: "fixed"},                 // A constant label.
-		{Name: "unique", Value: strconv.Itoa(id)},       // A unique label.
-		{Name: "group_1", Value: strconv.Itoa(id % 10)}, // A first grouping label.
-		{Name: "group_2", Value: strconv.Itoa(id % 5)},  // A second grouping label.
-	}
+	return labels.FromStrings(
+		"__name__", "metric_histogram_bucket",
+		"le", fmt.Sprintf("%f", bucketLe),
+		"const", "fixed", // A constant label.
+		"unique", strconv.Itoa(id), // A unique label.
+		"group_1", strconv.Itoa(id%10), // A first grouping label.
+		"group_2", strconv.Itoa(id%3), // A second grouping label.
+	)
 }
 
 // generator defined a function used to generate sample values in tests.
@@ -1817,13 +1886,14 @@ func (i *seriesIteratorMock) Warnings() storage.Warnings {
 // newEngine creates and return a new promql.Engine used for testing.
 func newEngine() *promql.Engine {
 	return promql.NewEngine(promql.EngineOpts{
-		Logger:             log.NewNopLogger(),
-		Reg:                nil,
-		MaxSamples:         10e6,
-		Timeout:            1 * time.Hour,
-		ActiveQueryTracker: nil,
-		LookbackDelta:      lookbackDelta,
-		EnableAtModifier:   true,
+		Logger:               log.NewNopLogger(),
+		Reg:                  nil,
+		MaxSamples:           10e6,
+		Timeout:              1 * time.Hour,
+		ActiveQueryTracker:   nil,
+		LookbackDelta:        lookbackDelta,
+		EnableAtModifier:     true,
+		EnableNegativeOffset: true,
 		NoStepSubqueryIntervalFn: func(rangeMillis int64) int64 {
 			return int64(1 * time.Minute / (time.Millisecond / time.Nanosecond))
 		},

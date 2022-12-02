@@ -1,6 +1,5 @@
 {
   local container = $.core.v1.container,
-  local podDisruptionBudget = $.policy.v1beta1.podDisruptionBudget,
   local pvc = $.core.v1.persistentVolumeClaim,
   local statefulSet = $.apps.v1.statefulSet,
   local volumeMount = $.core.v1.volumeMount,
@@ -14,6 +13,7 @@
     pvc.mixin.metadata.withName('store-gateway-data'),
 
   store_gateway_args::
+    $._config.usageStatsConfig +
     $._config.grpcConfig +
     $._config.storageConfig +
     $._config.blocksStorageConfig +
@@ -22,8 +22,6 @@
       target: 'store-gateway',
 
       'server.http-listen-port': $._config.server_http_port,
-
-      'runtime-config.file': '%s/overrides.yaml' % $._config.overrides_configmap_mountpoint,
 
       // Persist ring tokens so that when the store-gateway will be restarted
       // it will pick the same tokens
@@ -52,7 +50,8 @@
     } +
     $.blocks_chunks_caching_config +
     $.blocks_metadata_caching_config +
-    $.bucket_index_config,
+    $.bucket_index_config +
+    $.mimirRuntimeConfigFile,
 
   store_gateway_ports:: $.util.defaultPorts,
 
@@ -67,35 +66,20 @@
     $.jaeger_mixin,
 
   newStoreGatewayStatefulSet(name, container, with_anti_affinity=false)::
-    statefulSet.new(name, 3, [container], store_gateway_data_pvc) +
-    statefulSet.mixin.spec.withServiceName(name) +
-    statefulSet.mixin.metadata.withNamespace($._config.namespace) +
-    statefulSet.mixin.metadata.withLabels({ name: name }) +
-    statefulSet.mixin.spec.template.metadata.withLabels({ name: name }) +
-    statefulSet.mixin.spec.selector.withMatchLabels({ name: name }) +
-    statefulSet.mixin.spec.template.spec.securityContext.withRunAsUser(0) +
-    (if !std.isObject($._config.node_selector) then {} else statefulSet.mixin.spec.template.spec.withNodeSelectorMixin($._config.node_selector)) +
-    statefulSet.mixin.spec.updateStrategy.withType('RollingUpdate') +
+    $.newMimirStatefulSet(name, 3, container, store_gateway_data_pvc) +
     statefulSet.mixin.spec.template.spec.withTerminationGracePeriodSeconds(120) +
-    // Parallelly scale up/down store-gateway instances instead of starting them
-    // one by one. This does NOT affect rolling updates: they will continue to be
-    // rolled out one by one (the next pod will be rolled out once the previous is
-    // ready).
-    statefulSet.mixin.spec.withPodManagementPolicy('Parallel') +
-    $.util.configVolumeMount($._config.overrides_configmap, $._config.overrides_configmap_mountpoint) +
+    $.mimirVolumeMounts +
     (if with_anti_affinity then $.util.antiAffinity else {}),
 
-  store_gateway_statefulset: self.newStoreGatewayStatefulSet('store-gateway', $.store_gateway_container, !$._config.store_gateway_allow_multiple_replicas_on_same_node),
+  store_gateway_statefulset: if !$._config.is_microservices_deployment_mode then null else
+    self.newStoreGatewayStatefulSet('store-gateway', $.store_gateway_container, !$._config.store_gateway_allow_multiple_replicas_on_same_node),
 
-  store_gateway_service:
+  store_gateway_service: if !$._config.is_microservices_deployment_mode then null else
     $.util.serviceFor($.store_gateway_statefulset, $._config.service_ignored_labels),
 
-  store_gateway_pdb:
-    podDisruptionBudget.new() +
-    podDisruptionBudget.mixin.metadata.withName('store-gateway-pdb') +
-    podDisruptionBudget.mixin.metadata.withLabels({ name: 'store-gateway-pdb' }) +
-    podDisruptionBudget.mixin.spec.selector.withMatchLabels({ name: 'store-gateway' }) +
+  store_gateway_pdb: if !$._config.is_microservices_deployment_mode then null else
     // To avoid any disruption in the read path we need at least 1 replica of each
     // block available, so the disruption budget depends on the blocks replication factor.
-    podDisruptionBudget.mixin.spec.withMaxUnavailable(if $._config.store_gateway_replication_factor > 1 then $._config.store_gateway_replication_factor - 1 else 1),
+    local maxUnavailable = if $._config.store_gateway_replication_factor > 1 then $._config.store_gateway_replication_factor - 1 else 1;
+    $.newMimirPdb('store-gateway', maxUnavailable),
 }

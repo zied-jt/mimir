@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -48,6 +48,9 @@ const (
 	statusError = "error"
 
 	totalShardsControlHeader = "Sharding-Control"
+
+	// Instant query specific options
+	instantSplitControlHeader = "Instant-Split-Control"
 )
 
 // Codec is used to encode/decode query range requests and responses so they can be passed down to middlewares.
@@ -210,18 +213,30 @@ func decodeOptions(r *http.Request, opts *Options) {
 	for _, value := range r.Header.Values(cacheControlHeader) {
 		if strings.Contains(value, noStoreValue) {
 			opts.CacheDisabled = true
-			break
+			continue
 		}
 	}
 
 	for _, value := range r.Header.Values(totalShardsControlHeader) {
 		shards, err := strconv.ParseInt(value, 10, 32)
 		if err != nil {
-			break
+			continue
 		}
 		opts.TotalShards = int32(shards)
 		if opts.TotalShards < 1 {
 			opts.ShardingDisabled = true
+		}
+	}
+
+	for _, value := range r.Header.Values(instantSplitControlHeader) {
+		splitInterval, err := time.ParseDuration(value)
+		if err != nil {
+			continue
+		}
+		// Instant split by time interval unit stored in nanoseconds (time.Duration unit in int64)
+		opts.InstantSplitInterval = splitInterval.Nanoseconds()
+		if opts.InstantSplitInterval < 1 {
+			opts.InstantSplitDisabled = true
 		}
 	}
 }
@@ -265,12 +280,16 @@ func (prometheusCodec) EncodeRequest(ctx context.Context, r Request) (*http.Requ
 func (prometheusCodec) DecodeResponse(ctx context.Context, r *http.Response, _ Request, logger log.Logger) (Response, error) {
 	var resp PrometheusResponse
 	if r.StatusCode/100 == 5 {
-		body, _ := ioutil.ReadAll(r.Body)
 		return nil, httpgrpc.ErrorFromHTTPResponse(&httpgrpc.HTTPResponse{
 			Code: int32(r.StatusCode),
-			Body: body,
+			Body: mustReadAllBody(r),
 		})
+	} else if r.StatusCode == http.StatusTooManyRequests {
+		return nil, apierror.New(apierror.TypeTooManyRequests, string(mustReadAllBody(r)))
+	} else if r.StatusCode == http.StatusRequestEntityTooLarge {
+		return nil, apierror.New(apierror.TypeTooLargeEntry, string(mustReadAllBody(r)))
 	}
+
 	log, ctx := spanlogger.NewWithLogger(ctx, logger, "ParseQueryRangeResponse") //nolint:ineffassign,staticcheck
 	defer log.Finish()
 	log.LogFields(otlog.Int("status_code", r.StatusCode))
@@ -318,7 +337,7 @@ func (prometheusCodec) EncodeResponse(ctx context.Context, res Response) (*http.
 		Header: http.Header{
 			"Content-Type": []string{"application/json"},
 		},
-		Body:          ioutil.NopCloser(bytes.NewBuffer(b)),
+		Body:          io.NopCloser(bytes.NewBuffer(b)),
 		StatusCode:    http.StatusOK,
 		ContentLength: int64(len(b)),
 	}
@@ -437,4 +456,9 @@ func decorateWithParamName(err error, field string) error {
 		return apierror.Newf(apierror.TypeBadData, errTmpl, field, status.Message())
 	}
 	return apierror.Newf(apierror.TypeBadData, errTmpl, field, err)
+}
+
+func mustReadAllBody(r *http.Response) []byte {
+	body, _ := bodyBuffer(r)
+	return body
 }

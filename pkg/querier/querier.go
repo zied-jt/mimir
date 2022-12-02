@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/thanos-io/thanos/pkg/strutil"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/grafana/dskit/tenant"
@@ -49,22 +48,20 @@ type Config struct {
 
 	StoreGatewayClient ClientConfig `yaml:"store_gateway_client"`
 
-	ShuffleShardingIngestersLookbackPeriod time.Duration `yaml:"shuffle_sharding_ingesters_lookback_period" category:"advanced"`
+	ShuffleShardingIngestersEnabled bool `yaml:"shuffle_sharding_ingesters_enabled" category:"advanced"`
 
 	// PromQL engine config.
 	EngineConfig engine.Config `yaml:",inline"`
 }
 
 const (
-	queryIngestersWithinFlag                   = "querier.query-ingesters-within"
-	queryStoreAfterFlag                        = "querier.query-store-after"
-	shuffleShardingIngestersLookbackPeriodFlag = "querier.shuffle-sharding-ingesters-lookback-period"
+	queryIngestersWithinFlag = "querier.query-ingesters-within"
+	queryStoreAfterFlag      = "querier.query-store-after"
 )
 
 var (
-	errBadLookbackConfigs                             = fmt.Errorf("the -%s setting must be greater than -%s otherwise queries might return partial results", queryIngestersWithinFlag, queryStoreAfterFlag)
-	errShuffleShardingLookbackLessThanQueryStoreAfter = fmt.Errorf("the -%s setting must be greater or equal to -%s", shuffleShardingIngestersLookbackPeriodFlag, queryStoreAfterFlag)
-	errEmptyTimeRange                                 = errors.New("empty time range")
+	errBadLookbackConfigs = fmt.Errorf("the -%s setting must be greater than -%s otherwise queries might return partial results", queryIngestersWithinFlag, queryStoreAfterFlag)
+	errEmptyTimeRange     = errors.New("empty time range")
 )
 
 // RegisterFlags adds the flags required to config this to the given FlagSet.
@@ -75,7 +72,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.QueryIngestersWithin, queryIngestersWithinFlag, 13*time.Hour, "Maximum lookback beyond which queries are not sent to ingester. 0 means all queries are sent to ingester.")
 	f.DurationVar(&cfg.MaxQueryIntoFuture, "querier.max-query-into-future", 10*time.Minute, "Maximum duration into the future you can query. 0 to disable.")
 	f.DurationVar(&cfg.QueryStoreAfter, queryStoreAfterFlag, 12*time.Hour, "The time after which a metric should be queried from storage and not just ingesters. 0 means all queries are sent to store. If this option is enabled, the time range of the query sent to the store-gateway will be manipulated to ensure the query end is not more recent than 'now - query-store-after'.")
-	f.DurationVar(&cfg.ShuffleShardingIngestersLookbackPeriod, shuffleShardingIngestersLookbackPeriodFlag, 13*time.Hour, "When this setting is > 0, queriers fetch in-memory series from the minimum set of required ingesters, selecting only ingesters which may have received series since 'now - lookback period'. The lookback period should be greater or equal than the configured -querier.query-store-after and -querier.query-ingesters-within. If this setting is 0, queriers always query all ingesters (ingesters shuffle sharding on read path is disabled).")
+	f.BoolVar(&cfg.ShuffleShardingIngestersEnabled, "querier.shuffle-sharding-ingesters-enabled", true, fmt.Sprintf("Fetch in-memory series from the minimum set of required ingesters, selecting only ingesters which may have received series since -%s. If this setting is false or -%s is '0', queriers always query all ingesters (ingesters shuffle sharding on read path is disabled).", queryIngestersWithinFlag, queryIngestersWithinFlag))
 
 	cfg.EngineConfig.RegisterFlags(f)
 }
@@ -86,12 +83,6 @@ func (cfg *Config) Validate() error {
 	if cfg.QueryIngestersWithin != 0 && cfg.QueryStoreAfter != 0 {
 		if cfg.QueryStoreAfter >= cfg.QueryIngestersWithin {
 			return errBadLookbackConfigs
-		}
-	}
-
-	if cfg.ShuffleShardingIngestersLookbackPeriod > 0 {
-		if cfg.ShuffleShardingIngestersLookbackPeriod < cfg.QueryStoreAfter {
-			return errShuffleShardingLookbackLessThanQueryStoreAfter
 		}
 	}
 
@@ -182,7 +173,7 @@ func NewQueryable(distributor QueryableWithFilter, stores []QueryableWithFilter,
 		ctx = limiter.AddQueryLimiterToContext(ctx, limiter.NewQueryLimiter(limits.MaxFetchedSeriesPerQuery(userID), limits.MaxFetchedChunkBytesPerQuery(userID), limits.MaxChunksPerQuery(userID)))
 
 		mint, maxt, err = validateQueryTimeRange(ctx, userID, mint, maxt, limits, cfg.MaxQueryIntoFuture, logger)
-		if err == errEmptyTimeRange {
+		if errors.Is(err, errEmptyTimeRange) {
 			return storage.NoopQuerier(), nil
 		} else if err != nil {
 			return nil, err
@@ -242,13 +233,8 @@ func (q querier) Select(_ bool, sp *storage.SelectHints, matchers ...*labels.Mat
 	log, ctx := spanlogger.NewWithLogger(q.ctx, q.logger, "querier.Select")
 	defer log.Span.Finish()
 
-	// Older Prometheus passes nil SelectHints if it is doing a 'series' operation,
-	// which needs only metadata.
-	// Recent versions of Prometheus pass in the hint but with Func set to "series".
-	// See: https://github.com/prometheus/prometheus/pull/8050
 	if sp == nil {
 		sp = &storage.SelectHints{
-			Func:  "series",
 			Start: q.mint,
 			End:   q.maxt,
 		}
@@ -266,7 +252,7 @@ func (q querier) Select(_ bool, sp *storage.SelectHints, matchers ...*labels.Mat
 	// the querier, we need to check it again here because the time range specified in hints may be
 	// different.
 	startMs, endMs, err := validateQueryTimeRange(ctx, userID, sp.Start, sp.End, q.limits, q.maxQueryIntoFuture, q.logger)
-	if err == errEmptyTimeRange {
+	if errors.Is(err, errEmptyTimeRange) {
 		return storage.NoopSeriesSet()
 	} else if err != nil {
 		return storage.ErrSeriesSet(err)
@@ -316,7 +302,7 @@ func (q querier) Select(_ bool, sp *storage.SelectHints, matchers ...*labels.Mat
 	return q.mergeSeriesSets(result)
 }
 
-// LabelsValue implements storage.Querier.
+// LabelValues implements storage.Querier.
 func (q querier) LabelValues(name string, matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
 	if len(q.queriers) == 1 {
 		return q.queriers[0].LabelValues(name, matchers...)
@@ -354,7 +340,7 @@ func (q querier) LabelValues(name string, matchers ...*labels.Matcher) ([]string
 		return nil, nil, err
 	}
 
-	return strutil.MergeSlices(sets...), warnings, nil
+	return util.MergeSlices(sets...), warnings, nil
 }
 
 func (q querier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
@@ -394,7 +380,7 @@ func (q querier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warn
 		return nil, nil, err
 	}
 
-	return strutil.MergeSlices(sets...), warnings, nil
+	return util.MergeSlices(sets...), warnings, nil
 }
 
 func (querier) Close() error {
@@ -490,7 +476,7 @@ func (alwaysTrueFilterQueryable) UseQueryable(_ time.Time, _, _ int64) bool {
 	return true
 }
 
-// Wraps storage.Queryable into QueryableWithFilter, with no query filtering.
+// UseAlwaysQueryable wraps storage.Queryable into QueryableWithFilter, with no query filtering.
 func UseAlwaysQueryable(q storage.Queryable) QueryableWithFilter {
 	return alwaysTrueFilterQueryable{Queryable: q}
 }
@@ -507,7 +493,7 @@ func (u useBeforeTimestampQueryable) UseQueryable(_ time.Time, queryMinT, _ int6
 	return queryMinT < u.ts
 }
 
-// Returns QueryableWithFilter, that is used only if query starts before given timestamp.
+// UseBeforeTimestampQueryable returns QueryableWithFilter, that is used only if query starts before given timestamp.
 // If timestamp is zero (time.IsZero), queryable is always used.
 func UseBeforeTimestampQueryable(queryable storage.Queryable, ts time.Time) QueryableWithFilter {
 	t := int64(0)

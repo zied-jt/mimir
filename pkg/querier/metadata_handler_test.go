@@ -7,7 +7,7 @@ package querier
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,7 +25,7 @@ func TestMetadataHandler_Success(t *testing.T) {
 		},
 		nil)
 
-	handler := MetadataHandler(d)
+	handler := NewMetadataHandler(d)
 
 	request, err := http.NewRequest("GET", "/metadata", nil)
 	require.NoError(t, err)
@@ -34,7 +34,7 @@ func TestMetadataHandler_Success(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusOK, recorder.Result().StatusCode)
-	responseBody, err := ioutil.ReadAll(recorder.Result().Body)
+	responseBody, err := io.ReadAll(recorder.Result().Body)
 	require.NoError(t, err)
 
 	expectedJSON := `
@@ -59,7 +59,7 @@ func TestMetadataHandler_Error(t *testing.T) {
 	d := &mockDistributor{}
 	d.On("MetricsMetadata", mock.Anything).Return([]scrape.MetricMetadata{}, fmt.Errorf("no user id"))
 
-	handler := MetadataHandler(d)
+	handler := NewMetadataHandler(d)
 
 	request, err := http.NewRequest("GET", "/metadata", nil)
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func TestMetadataHandler_Error(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusBadRequest, recorder.Result().StatusCode)
-	responseBody, err := ioutil.ReadAll(recorder.Result().Body)
+	responseBody, err := io.ReadAll(recorder.Result().Body)
 	require.NoError(t, err)
 
 	expectedJSON := `

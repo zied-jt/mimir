@@ -8,7 +8,6 @@ package storegateway
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"net/http"
@@ -39,20 +38,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/extprom"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/store/labelpb"
-	"github.com/thanos-io/thanos/pkg/store/storepb"
+	"github.com/thanos-io/objstore"
 	"google.golang.org/grpc/status"
 
+	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	"github.com/grafana/mimir/pkg/storage/bucket/filesystem"
 	"github.com/grafana/mimir/pkg/storage/sharding"
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
 	"github.com/grafana/mimir/pkg/storage/tsdb/bucketindex"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 	mimir_testutil "github.com/grafana/mimir/pkg/storage/tsdb/testutil"
+	"github.com/grafana/mimir/pkg/storegateway/storepb"
 	"github.com/grafana/mimir/pkg/util"
 	"github.com/grafana/mimir/pkg/util/test"
 	"github.com/grafana/mimir/pkg/util/validation"
@@ -225,7 +223,7 @@ func TestStoreGateway_InitialSyncWithWaitRingTokensStability(t *testing.T) {
 		userBucketClient := bucket.NewUserBucketClient(userID, bucketClient, nil)
 		require.NoError(t, bucketClientOnDisk.Iter(context.Background(), userID, func(key string) error {
 			dir := strings.TrimSuffix(path.Join(storageDir, key), "/")
-			err := block.UploadPromBlock(context.Background(), log.NewNopLogger(), userBucketClient, dir, metadata.NoneFunc)
+			err := mimir_tsdb.UploadBlock(context.Background(), log.NewNopLogger(), userBucketClient, dir, nil)
 			if err != nil {
 				return err
 			}
@@ -564,7 +562,7 @@ func TestStoreGateway_ShouldSupportLoadRingTokensFromFile(t *testing.T) {
 
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
-			tokensFile, err := ioutil.TempFile(os.TempDir(), "tokens-*")
+			tokensFile, err := os.CreateTemp(os.TempDir(), "tokens-*")
 			require.NoError(t, err)
 			t.Cleanup(func() { assert.NoError(t, os.Remove(tokensFile.Name())) })
 
@@ -1018,10 +1016,10 @@ func TestStoreGateway_SeriesQueryingShouldRemoveExternalLabels(t *testing.T) {
 	for idx, blockID := range blockIDs {
 		meta := metadata.Thanos{
 			Labels: map[string]string{
-				mimir_tsdb.TenantIDExternalLabel:          userID,
-				mimir_tsdb.IngesterIDExternalLabel:        fmt.Sprintf("ingester-%d", idx),
-				mimir_tsdb.CompactorShardIDExternalLabel:  fmt.Sprintf("%d_of_2", (idx%2)+1),
-				mimir_tsdb.DeprecatedShardIDExternalLabel: fmt.Sprintf("shard-%d", idx),
+				mimir_tsdb.DeprecatedTenantIDExternalLabel:   userID,
+				mimir_tsdb.DeprecatedIngesterIDExternalLabel: fmt.Sprintf("ingester-%d", idx),
+				mimir_tsdb.CompactorShardIDExternalLabel:     fmt.Sprintf("%d_of_2", (idx%2)+1),
+				mimir_tsdb.DeprecatedShardIDExternalLabel:    fmt.Sprintf("shard-%d", idx),
 			},
 			Source: metadata.TestSource,
 		}
@@ -1064,7 +1062,7 @@ func TestStoreGateway_SeriesQueryingShouldRemoveExternalLabels(t *testing.T) {
 				actual := srv.SeriesSet[seriesID]
 
 				// Ensure Mimir external labels have been removed.
-				assert.Equal(t, []labelpb.ZLabel{{Name: "series_id", Value: strconv.Itoa(seriesID)}}, actual.Labels)
+				assert.Equal(t, []mimirpb.LabelAdapter{{Name: "series_id", Value: strconv.Itoa(seriesID)}}, actual.Labels)
 
 				// Ensure samples have been correctly queried. The Thanos store also deduplicate samples
 				// in most cases, but it's not strictly required guaranteeing deduplication at this stage.
@@ -1085,11 +1083,11 @@ func TestStoreGateway_Series_QuerySharding(t *testing.T) {
 		ctx    = context.Background()
 		userID = "user-1"
 		series = []labels.Labels{
-			labels.New(labels.Label{Name: labels.MetricName, Value: "series_1"}), // Hash: 12248531033489120077
-			labels.New(labels.Label{Name: labels.MetricName, Value: "series_2"}), // Hash: 4624373102974193462
-			labels.New(labels.Label{Name: labels.MetricName, Value: "series_3"}), // Hash: 11488854180004364397
-			labels.New(labels.Label{Name: labels.MetricName, Value: "series_4"}), // Hash: 7076372709108762848
-			labels.New(labels.Label{Name: labels.MetricName, Value: "series_5"}), // Hash: 2682489904774096023
+			labels.FromStrings(labels.MetricName, "series_1"), // Hash: 12248531033489120077
+			labels.FromStrings(labels.MetricName, "series_2"), // Hash: 4624373102974193462
+			labels.FromStrings(labels.MetricName, "series_3"), // Hash: 11488854180004364397
+			labels.FromStrings(labels.MetricName, "series_4"), // Hash: 7076372709108762848
+			labels.FromStrings(labels.MetricName, "series_5"), // Hash: 2682489904774096023
 		}
 	)
 
@@ -1415,7 +1413,7 @@ func mockTSDB(t *testing.T, dir string, numSeries, numBlocks int, minT, maxT int
 
 	step := (maxT - minT) / int64(numSeries)
 	addSample := func(i int) {
-		lbls := labels.Labels{labels.Label{Name: "series_id", Value: strconv.Itoa(i)}}
+		lbls := labels.FromStrings("series_id", strconv.Itoa(i))
 
 		app := db.Appender(context.Background())
 		_, err := app.Append(0, lbls, minT+(step*int64(i)), float64(i))
@@ -1548,7 +1546,7 @@ func (m *mockShardingStrategy) FilterUsers(ctx context.Context, userIDs []string
 	return args.Get(0).([]string), args.Error(1)
 }
 
-func (m *mockShardingStrategy) FilterBlocks(ctx context.Context, userID string, metas map[ulid.ULID]*metadata.Meta, loaded map[ulid.ULID]struct{}, synced *extprom.TxGaugeVec) error {
+func (m *mockShardingStrategy) FilterBlocks(ctx context.Context, userID string, metas map[ulid.ULID]*metadata.Meta, loaded map[ulid.ULID]struct{}, synced block.GaugeVec) error {
 	args := m.Called(ctx, userID, metas, loaded, synced)
 	return args.Error(0)
 }

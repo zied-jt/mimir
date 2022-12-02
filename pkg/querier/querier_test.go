@@ -73,11 +73,9 @@ func TestQuerier(t *testing.T) {
 		// Very simple single-point gets, with low step.  Performance should be
 		// similar to above.
 		{
-			query: "foo",
-			step:  sampleRate * 4,
-			labels: labels.Labels{
-				labels.Label{Name: model.MetricNameLabel, Value: "foo"},
-			},
+			query:  "foo",
+			step:   sampleRate * 4,
+			labels: labels.FromStrings(model.MetricNameLabel, "foo"),
 			samples: func(from, through time.Time, step time.Duration) int {
 				return int(through.Sub(from)/step) + 1
 			},
@@ -101,11 +99,9 @@ func TestQuerier(t *testing.T) {
 
 		// Single points gets with large step; excersise Seek performance.
 		{
-			query: "foo",
-			step:  sampleRate * 4 * 10,
-			labels: labels.Labels{
-				labels.Label{Name: model.MetricNameLabel, Value: "foo"},
-			},
+			query:  "foo",
+			step:   sampleRate * 4 * 10,
+			labels: labels.FromStrings(model.MetricNameLabel, "foo"),
 			samples: func(from, through time.Time, step time.Duration) int {
 				return int(through.Sub(from)/step) + 1
 			},
@@ -234,7 +230,7 @@ func mockTSDB(t *testing.T, mint model.Time, samples int, step, chunkOffset time
 	opts := tsdb.DefaultHeadOptions()
 	opts.ChunkDirRoot = dir
 	// We use TSDB head only. By using full TSDB DB, and appending samples to it, closing it would cause unnecessary HEAD compaction, which slows down the test.
-	head, err := tsdb.NewHead(nil, nil, nil, opts, nil)
+	head, err := tsdb.NewHead(nil, nil, nil, nil, opts, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = head.Close()
@@ -242,9 +238,7 @@ func mockTSDB(t *testing.T, mint model.Time, samples int, step, chunkOffset time
 
 	app := head.Appender(context.Background())
 
-	l := labels.Labels{
-		{Name: model.MetricNameLabel, Value: "foo"},
-	}
+	l := labels.FromStrings(model.MetricNameLabel, "foo")
 
 	cnt := 0
 	chunkStartTs := mint
@@ -1053,19 +1047,6 @@ func TestConfig_Validate(t *testing.T) {
 				cfg.QueryStoreAfter = time.Hour
 			},
 		},
-		"should pass if 'query store after' is enabled and shuffle-sharding is enabled with greater value": {
-			setup: func(cfg *Config) {
-				cfg.QueryStoreAfter = time.Hour
-				cfg.ShuffleShardingIngestersLookbackPeriod = 2 * time.Hour
-			},
-		},
-		"should fail if 'query store after' is enabled and shuffle-sharding is enabled with lesser value": {
-			setup: func(cfg *Config) {
-				cfg.QueryStoreAfter = time.Hour
-				cfg.ShuffleShardingIngestersLookbackPeriod = time.Minute
-			},
-			expected: errShuffleShardingLookbackLessThanQueryStoreAfter,
-		},
 		"should pass if both 'query store after' and 'query ingesters within' are set and 'query store after' < 'query ingesters within'": {
 			setup: func(cfg *Config) {
 				cfg.QueryStoreAfter = time.Hour
@@ -1086,7 +1067,6 @@ func TestConfig_Validate(t *testing.T) {
 			cfg := &Config{}
 			flagext.DefaultValues(cfg)
 			testData.setup(cfg)
-
 			assert.Equal(t, testData.expected, cfg.Validate())
 		})
 	}

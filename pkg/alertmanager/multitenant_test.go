@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -40,7 +40,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/user"
 	"go.uber.org/atomic"
@@ -122,71 +122,81 @@ func setupSingleMultitenantAlertmanager(t *testing.T, cfg *MultitenantAlertmanag
 
 func TestMultitenantAlertmanagerConfig_Validate(t *testing.T) {
 	tests := map[string]struct {
-		setup    func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config)
+		setup    func(t *testing.T, cfg *MultitenantAlertmanagerConfig)
 		expected error
 	}{
 		"should pass with default config": {
-			setup:    func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {},
+			setup:    func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {},
 			expected: nil,
 		},
 		"should fail with empty external URL": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
 				require.NoError(t, cfg.ExternalURL.Set(""))
 			},
 			expected: errEmptyExternalURL,
 		},
 		"should fail if persistent interval is 0": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
 				cfg.Persister.Interval = 0
 			},
 			expected: errInvalidPersistInterval,
 		},
 		"should fail if persistent interval is negative": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
 				cfg.Persister.Interval = -1
 			},
 			expected: errInvalidPersistInterval,
 		},
 		"should fail if external URL ends with /": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
 				require.NoError(t, cfg.ExternalURL.Set("http://localhost/prefix/"))
 			},
-			expected: errInvalidExternalURL,
+			expected: errInvalidExternalURLEndingSlash,
 		},
 		"should succeed if external URL does not end with /": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
 				require.NoError(t, cfg.ExternalURL.Set("http://localhost/prefix"))
 			},
 			expected: nil,
 		},
-		"should succeed if new storage configuration given with bucket client": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
-				storageCfg.Backend = "s3"
+		"should fail if external URL has no scheme": {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
+				require.NoError(t, cfg.ExternalURL.Set("example.com/alertmanager"))
 			},
-			expected: nil,
+			expected: errInvalidExternalURLMissingScheme,
 		},
-		"should succeed if new storage store configuration given with local type": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
-				storageCfg.Backend = "local"
+		"should fail if external URL has no hostname": {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
+				require.NoError(t, cfg.ExternalURL.Set("https:///alertmanager"))
 			},
-			expected: nil,
+			expected: errInvalidExternalURLMissingHostname,
 		},
 		"should fail if zone aware is enabled but zone is not set": {
-			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig, storageCfg *alertstore.Config) {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
 				cfg.ShardingRing.ZoneAwarenessEnabled = true
 			},
 			expected: errZoneAwarenessEnabledWithoutZoneInfo,
+		},
+		"should pass if the URL just contains the path with the leading /": {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
+				require.NoError(t, cfg.ExternalURL.Set("/alertmanager"))
+			},
+			expected: nil,
+		},
+		"should fail if the URL just contains the hostname (because it can't be disambiguated with a path)": {
+			setup: func(t *testing.T, cfg *MultitenantAlertmanagerConfig) {
+				require.NoError(t, cfg.ExternalURL.Set("alertmanager"))
+			},
+			expected: errInvalidExternalURLMissingScheme,
 		},
 	}
 
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
 			cfg := &MultitenantAlertmanagerConfig{}
-			storageCfg := alertstore.Config{}
 			flagext.DefaultValues(cfg)
-			flagext.DefaultValues(&storageCfg)
-			testData.setup(t, cfg, &storageCfg)
-			assert.Equal(t, testData.expected, cfg.Validate(storageCfg))
+			testData.setup(t, cfg)
+			assert.Equal(t, testData.expected, cfg.Validate())
 		})
 	}
 }
@@ -475,6 +485,39 @@ receivers:
 `, backendURL)
 			},
 		},
+		"discord": {
+			getAlertmanagerConfig: func(backendURL string) string {
+				return fmt.Sprintf(`
+route:
+  receiver: discord
+  group_wait: 0s
+  group_interval: 1s
+
+receivers:
+  - name: discord
+    discord_configs:
+      - webhook_url: %s
+`, backendURL)
+			},
+		},
+		// We expect requests against the HTTP proxy to be blocked too.
+		"HTTP proxy": {
+			getAlertmanagerConfig: func(backendURL string) string {
+				return fmt.Sprintf(`
+route:
+  receiver: webhook
+  group_wait: 0s
+  group_interval: 1s
+
+receivers:
+  - name: webhook
+    webhook_configs:
+      - url: https://www.google.com
+        http_config:
+          proxy_url: %s
+`, backendURL)
+			},
+		},
 	}
 
 	for receiverName, testData := range tests {
@@ -554,7 +597,7 @@ receivers:
 					am.ServeHTTP(w, req.WithContext(reqCtx))
 
 					resp := w.Result()
-					_, err := ioutil.ReadAll(resp.Body)
+					_, err := io.ReadAll(resp.Body)
 					require.NoError(t, err)
 					assert.Equal(t, http.StatusOK, w.Code)
 				}
@@ -576,39 +619,6 @@ receivers:
 			})
 		}
 	}
-}
-
-func TestMultitenantAlertmanager_migrateStateFilesToPerTenantDirectories(t *testing.T) {
-	ctx := context.Background()
-
-	const (
-		user1 = "user1"
-		user2 = "user2"
-	)
-
-	store := prepareInMemoryAlertStore()
-	require.NoError(t, store.SetAlertConfig(ctx, alertspb.AlertConfigDesc{
-		User:      user2,
-		RawConfig: simpleConfigOne,
-		Templates: []*alertspb.TemplateDesc{},
-	}))
-
-	reg := prometheus.NewPedanticRegistry()
-	cfg := mockAlertmanagerConfig(t)
-	am, err := createMultitenantAlertmanager(cfg, nil, store, nil, nil, log.NewNopLogger(), reg)
-	require.NoError(t, err)
-
-	createFile(t, filepath.Join(cfg.DataDir, "nflog:"+user1))
-	createFile(t, filepath.Join(cfg.DataDir, "silences:"+user1))
-	createFile(t, filepath.Join(cfg.DataDir, "nflog:"+user2))
-	createFile(t, filepath.Join(cfg.DataDir, "templates", user2, "template.tpl"))
-
-	require.NoError(t, am.migrateStateFilesToPerTenantDirectories())
-	require.True(t, fileExists(t, filepath.Join(cfg.DataDir, user1, notificationLogSnapshot)))
-	require.True(t, fileExists(t, filepath.Join(cfg.DataDir, user1, silencesSnapshot)))
-	require.True(t, fileExists(t, filepath.Join(cfg.DataDir, user2, notificationLogSnapshot)))
-	require.True(t, dirExists(t, filepath.Join(cfg.DataDir, user2, templatesDir)))
-	require.True(t, fileExists(t, filepath.Join(cfg.DataDir, user2, templatesDir, "template.tpl")))
 }
 
 func fileExists(t *testing.T, path string) bool {
@@ -872,8 +882,8 @@ func TestMultitenantAlertmanager_ServeHTTP(t *testing.T) {
 		am.ServeHTTP(w, req.WithContext(ctx))
 
 		resp := w.Result()
-		body, _ := ioutil.ReadAll(resp.Body)
-		require.Equal(t, 404, w.Code)
+		body, _ := io.ReadAll(resp.Body)
+		require.Equal(t, 412, w.Code)
 		require.Equal(t, "the Alertmanager is not configured\n", string(body))
 	}
 
@@ -931,8 +941,8 @@ func TestMultitenantAlertmanager_ServeHTTP(t *testing.T) {
 		am.ServeHTTP(w, req.WithContext(ctx))
 
 		resp := w.Result()
-		body, _ := ioutil.ReadAll(resp.Body)
-		require.Equal(t, 404, w.Code)
+		body, _ := io.ReadAll(resp.Body)
+		require.Equal(t, 412, w.Code)
 		require.Equal(t, "the Alertmanager is not configured\n", string(body))
 	}
 }
@@ -1721,7 +1731,7 @@ func TestAlertmanager_StateReplication(t *testing.T) {
 				multitenantAM.serveRequest(w, req.WithContext(reqCtx))
 
 				resp := w.Result()
-				body, _ := ioutil.ReadAll(resp.Body)
+				body, _ := io.ReadAll(resp.Body)
 				assert.Equal(t, http.StatusOK, w.Code)
 				require.Regexp(t, regexp.MustCompile(`{"silenceID":".+"}`), string(body))
 			}
@@ -1871,7 +1881,7 @@ func TestAlertmanager_StateReplication_InitialSyncFromPeers(t *testing.T) {
 					i.serveRequest(w, req.WithContext(reqCtx))
 
 					resp := w.Result()
-					body, _ := ioutil.ReadAll(resp.Body)
+					body, _ := io.ReadAll(resp.Body)
 					assert.Equal(t, http.StatusOK, w.Code)
 					require.Regexp(t, regexp.MustCompile(`{"silenceID":".+"}`), string(body))
 				}
@@ -1886,7 +1896,7 @@ func TestAlertmanager_StateReplication_InitialSyncFromPeers(t *testing.T) {
 					i.serveRequest(w, req.WithContext(reqCtx))
 
 					resp := w.Result()
-					body, _ := ioutil.ReadAll(resp.Body)
+					body, _ := io.ReadAll(resp.Body)
 					assert.Equal(t, http.StatusOK, w.Code)
 					require.Regexp(t, regexp.MustCompile(`"comment":"Created for a test case."`), string(body))
 				}

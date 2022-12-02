@@ -17,29 +17,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
+
+	"github.com/grafana/mimir/pkg/ingester/activeseries"
 )
-
-// mockTenantLimits exposes per-tenant limits based on a provided map
-type mockTenantLimits struct {
-	limits map[string]*Limits
-}
-
-// newMockTenantLimits creates a new mockTenantLimits that returns per-tenant limits based on
-// the given map
-func newMockTenantLimits(limits map[string]*Limits) *mockTenantLimits {
-	return &mockTenantLimits{
-		limits: limits,
-	}
-}
-
-func (l *mockTenantLimits) ByUserID(userID string) *Limits {
-	return l.limits[userID]
-}
-
-func (l *mockTenantLimits) AllByUserID() map[string]*Limits {
-	return l.limits
-}
 
 func TestOverridesManager_GetOverrides(t *testing.T) {
 	tenantLimits := map[string]*Limits{}
@@ -47,7 +28,7 @@ func TestOverridesManager_GetOverrides(t *testing.T) {
 	defaults := Limits{
 		MaxLabelNamesPerSeries: 100,
 	}
-	ov, err := NewOverrides(defaults, newMockTenantLimits(tenantLimits))
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
 	require.NoError(t, err)
 
 	require.Equal(t, 100, ov.MaxLabelNamesPerSeries("user1"))
@@ -55,8 +36,7 @@ func TestOverridesManager_GetOverrides(t *testing.T) {
 
 	// Update limits for tenant user1. We only update single field, the rest is copied from defaults.
 	// (That is how limits work when loaded from YAML)
-	l := Limits{}
-	l = defaults
+	l := defaults
 	l.MaxLabelValueLength = 150
 
 	tenantLimits["user1"] = &l
@@ -78,8 +58,9 @@ func TestLimitsLoadingFromYaml(t *testing.T) {
 	inp := `ingestion_rate: 0.5`
 
 	l := Limits{}
-	err := yaml.UnmarshalStrict([]byte(inp), &l)
-	require.NoError(t, err)
+	dec := yaml.NewDecoder(strings.NewReader(inp))
+	dec.KnownFields(true)
+	require.NoError(t, dec.Decode(&l))
 
 	assert.Equal(t, 0.5, l.IngestionRate, "from yaml")
 	assert.Equal(t, 100, l.MaxLabelNameLength, "from defaults")
@@ -181,8 +162,9 @@ metric_relabel_configs:
 	exp.SourceLabels = model.LabelNames([]model.LabelName{"le"})
 
 	l := Limits{}
-	err = yaml.UnmarshalStrict([]byte(inp), &l)
-	require.NoError(t, err)
+	dec := yaml.NewDecoder(strings.NewReader(inp))
+	dec.KnownFields(true)
+	require.NoError(t, dec.Decode(&l))
 
 	assert.Equal(t, []*relabel.Config{&exp}, l.MetricRelabelConfigs)
 }
@@ -200,7 +182,7 @@ func TestSmallestPositiveIntPerTenant(t *testing.T) {
 	defaults := Limits{
 		MaxQueryParallelism: 0,
 	}
-	ov, err := NewOverrides(defaults, newMockTenantLimits(tenantLimits))
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
@@ -232,7 +214,7 @@ func TestSmallestPositiveNonZeroIntPerTenant(t *testing.T) {
 	defaults := Limits{
 		MaxQueriersPerTenant: 0,
 	}
-	ov, err := NewOverrides(defaults, newMockTenantLimits(tenantLimits))
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
@@ -264,7 +246,7 @@ func TestSmallestPositiveNonZeroDurationPerTenant(t *testing.T) {
 	defaults := Limits{
 		MaxQueryLength: 0,
 	}
-	ov, err := NewOverrides(defaults, newMockTenantLimits(tenantLimits))
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
@@ -280,6 +262,99 @@ func TestSmallestPositiveNonZeroDurationPerTenant(t *testing.T) {
 		{tenantIDs: []string{"tenant-a", "tenant-b", "tenant-c"}, expLimit: time.Hour},
 	} {
 		assert.Equal(t, tc.expLimit, SmallestPositiveNonZeroDurationPerTenant(tc.tenantIDs, ov.MaxQueryLength))
+	}
+}
+
+func TestLargestPositiveNonZeroDurationPerTenant(t *testing.T) {
+	tenantLimits := map[string]*Limits{
+		"tenant-a": {
+			CreationGracePeriod: model.Duration(time.Hour),
+		},
+		"tenant-b": {
+			CreationGracePeriod: model.Duration(4 * time.Hour),
+		},
+	}
+
+	defaults := Limits{
+		CreationGracePeriod: 0,
+	}
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		tenantIDs []string
+		expLimit  time.Duration
+	}{
+		{tenantIDs: []string{}, expLimit: time.Duration(0)},
+		{tenantIDs: []string{"tenant-a"}, expLimit: time.Hour},
+		{tenantIDs: []string{"tenant-b"}, expLimit: 4 * time.Hour},
+		{tenantIDs: []string{"tenant-c"}, expLimit: time.Duration(0)},
+		{tenantIDs: []string{"tenant-a", "tenant-b"}, expLimit: 4 * time.Hour},
+		{tenantIDs: []string{"tenant-c", "tenant-d", "tenant-e"}, expLimit: time.Duration(0)},
+		{tenantIDs: []string{"tenant-a", "tenant-b", "tenant-c"}, expLimit: 4 * time.Hour},
+	} {
+		assert.Equal(t, tc.expLimit, LargestPositiveNonZeroDurationPerTenant(tc.tenantIDs, ov.CreationGracePeriod))
+	}
+}
+
+func TestMaxTotalQueryLengthWithoutDefault(t *testing.T) {
+	tenantLimits := map[string]*Limits{
+		"tenant-a": {
+			MaxQueryLength: model.Duration(time.Hour),
+		},
+		"tenant-b": {
+			MaxQueryLength:      model.Duration(time.Hour),
+			MaxTotalQueryLength: model.Duration(4 * time.Hour),
+		},
+	}
+	defaults := Limits{
+		MaxQueryLength: model.Duration(2 * time.Hour),
+	}
+
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		tenantIDs []string
+		expLimit  time.Duration
+	}{
+		{tenantIDs: []string{}, expLimit: time.Duration(0)},
+		{tenantIDs: []string{"tenant-a"}, expLimit: time.Hour},
+		{tenantIDs: []string{"tenant-b"}, expLimit: 4 * time.Hour},
+		{tenantIDs: []string{"tenant-c"}, expLimit: 2 * time.Hour},
+	} {
+		assert.Equal(t, tc.expLimit, SmallestPositiveNonZeroDurationPerTenant(tc.tenantIDs, ov.MaxTotalQueryLength))
+	}
+}
+
+func TestMaxTotalQueryLengthWithDefault(t *testing.T) {
+	tenantLimits := map[string]*Limits{
+		"tenant-a": {
+			MaxQueryLength: model.Duration(time.Hour),
+		},
+		"tenant-b": {
+			MaxQueryLength:      model.Duration(time.Hour),
+			MaxTotalQueryLength: model.Duration(4 * time.Hour),
+		},
+	}
+	defaults := Limits{
+		MaxQueryLength:      model.Duration(2 * time.Hour),
+		MaxTotalQueryLength: model.Duration(3 * time.Hour),
+	}
+
+	ov, err := NewOverrides(defaults, NewMockTenantLimits(tenantLimits))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		tenantIDs []string
+		expLimit  time.Duration
+	}{
+		{tenantIDs: []string{}, expLimit: time.Duration(0)},
+		{tenantIDs: []string{"tenant-a"}, expLimit: time.Hour},
+		{tenantIDs: []string{"tenant-b"}, expLimit: 4 * time.Hour},
+		{tenantIDs: []string{"tenant-c"}, expLimit: 3 * time.Hour},
+	} {
+		assert.Equal(t, tc.expLimit, SmallestPositiveNonZeroDurationPerTenant(tc.tenantIDs, ov.MaxTotalQueryLength))
 	}
 }
 
@@ -377,7 +452,7 @@ testuser:
 
 	differentUserOverride := `
 differentuser:
-  alertmanager_notification_limits_per_integration:
+  alertmanager_notification_rate_limit_per_integration:
     email: 500
 `
 
@@ -459,7 +534,7 @@ testuser:
 			expectedBurstSize: 5,
 		},
 
-		"different user overridem, email": {
+		"different user override, email": {
 			testedIntegration: "email",
 			overrides:         differentUserOverride,
 			expectedRateLimit: 100,
@@ -479,7 +554,7 @@ testuser:
 			err = yaml.Unmarshal([]byte(tc.overrides), &overrides)
 			require.NoError(t, err, "parsing overrides")
 
-			tl := newMockTenantLimits(overrides)
+			tl := NewMockTenantLimits(overrides)
 
 			ov, err := NewOverrides(limitsYAML, tl)
 			require.NoError(t, err)
@@ -488,4 +563,20 @@ testuser:
 			require.Equal(t, tc.expectedBurstSize, ov.NotificationBurstSize("testuser", tc.testedIntegration))
 		})
 	}
+}
+
+func TestCustomTrackerConfigDeserialize(t *testing.T) {
+	expectedConfig, err := activeseries.NewCustomTrackersConfig(map[string]string{"baz": `{foo="bar"}`})
+	require.NoError(t, err, "creating expected config")
+	cfg := `
+    user:
+        active_series_custom_trackers:
+            baz: '{foo="bar"}'
+    `
+
+	overrides := map[string]*Limits{}
+	require.NoError(t, yaml.Unmarshal([]byte(cfg), &overrides), "parsing overrides")
+
+	assert.False(t, overrides["user"].ActiveSeriesCustomTrackersConfig.Empty())
+	assert.Equal(t, expectedConfig.String(), overrides["user"].ActiveSeriesCustomTrackersConfig.String())
 }

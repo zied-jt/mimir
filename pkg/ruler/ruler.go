@@ -30,9 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/prometheus/model/rulefmt"
-	"github.com/prometheus/prometheus/notifier"
 	promRules "github.com/prometheus/prometheus/rules"
-	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/weaveworks/common/user"
 	"golang.org/x/sync/errgroup"
 
@@ -75,7 +73,7 @@ type Config struct {
 	// This is used for template expansion in alerts; must be a valid URL.
 	ExternalURL flagext.URLValue `yaml:"external_url"`
 	// GRPC Client configuration.
-	ClientTLSConfig grpcclient.Config `yaml:"ruler_client"`
+	ClientTLSConfig grpcclient.Config `yaml:"ruler_client" doc:"description=Configures the gRPC client used to communicate between ruler instances."`
 	// How frequently to evaluate rules by default.
 	EvaluationInterval time.Duration `yaml:"evaluation_interval" category:"advanced"`
 	// How frequently to poll for updated rules.
@@ -102,9 +100,7 @@ type Config struct {
 	ResendDelay time.Duration `yaml:"resend_delay" category:"advanced"`
 
 	// Enable sharding rule groups.
-	SearchPendingFor time.Duration `yaml:"search_pending_for" category:"advanced"`
-	Ring             RingConfig    `yaml:"ring"`
-	FlushCheckPeriod time.Duration `yaml:"flush_period" category:"advanced"`
+	Ring RingConfig `yaml:"ring"`
 
 	EnableAPI bool `yaml:"enable_api"`
 
@@ -115,7 +111,7 @@ type Config struct {
 
 	EnableQueryStats bool `yaml:"query_stats_enabled" category:"advanced"`
 
-	QueryFrontend QueryFrontendConfig `yaml:"query_frontend" category:"experimental"`
+	QueryFrontend QueryFrontendConfig `yaml:"query_frontend"`
 
 	TenantFederation TenantFederationConfig `yaml:"tenant_federation"`
 }
@@ -145,13 +141,11 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	f.DurationVar(&cfg.EvaluationInterval, "ruler.evaluation-interval", 1*time.Minute, "How frequently to evaluate rules")
 	f.DurationVar(&cfg.PollInterval, "ruler.poll-interval", 1*time.Minute, "How frequently to poll for rule changes")
 
-	f.StringVar(&cfg.AlertmanagerURL, "ruler.alertmanager-url", "", "Comma-separated list of URL(s) of the Alertmanager(s) to send notifications to. Each URL is treated as a separate group. Multiple Alertmanagers in HA per group can be supported by using DNS service discovery format. Basic auth is supported as part of the URL.")
+	f.StringVar(&cfg.AlertmanagerURL, "ruler.alertmanager-url", "", "Comma-separated list of URL(s) of the Alertmanager(s) to send notifications to. Each URL is treated as a separate group. Multiple Alertmanagers in HA per group can be supported by using DNS service discovery format, comprehensive of the scheme. Basic auth is supported as part of the URL.")
 	f.DurationVar(&cfg.AlertmanagerRefreshInterval, "ruler.alertmanager-refresh-interval", 1*time.Minute, "How long to wait between refreshing DNS resolutions of Alertmanager hosts.")
 	f.IntVar(&cfg.NotificationQueueCapacity, "ruler.notification-queue-capacity", 10000, "Capacity of the queue for notifications to be sent to the Alertmanager.")
 	f.DurationVar(&cfg.NotificationTimeout, "ruler.notification-timeout", 10*time.Second, "HTTP timeout duration when sending notifications to the Alertmanager.")
 
-	f.DurationVar(&cfg.SearchPendingFor, "ruler.search-pending-for", 5*time.Minute, "Time to spend searching for a pending ruler when shutting down.")
-	f.DurationVar(&cfg.FlushCheckPeriod, "ruler.flush-period", 1*time.Minute, "Period with which to attempt to flush rule groups.")
 	f.StringVar(&cfg.RulePath, "ruler.rule-path", "./data-ruler/", "Directory to store temporary rule files loaded by the Prometheus rule managers. This directory is not required to be persisted between restarts.")
 	f.BoolVar(&cfg.EnableAPI, "ruler.enable-api", true, "Enable the ruler config API.")
 	f.DurationVar(&cfg.OutageTolerance, "ruler.for-outage-tolerance", time.Hour, `Max time to tolerate outage for restoring "for" state of alert.`)
@@ -210,6 +204,7 @@ type MultiTenantManager interface {
 }
 
 // Ruler evaluates rules.
+//
 //	+---------------------------------------------------------------+
 //	|                                                               |
 //	|                   Query       +-------------+                 |
@@ -294,7 +289,7 @@ func newRuler(cfg Config, manager MultiTenantManager, reg prometheus.Registerer,
 		return nil, errors.Wrap(err, "create KV store client")
 	}
 
-	if err = enableSharding(ruler, ringStore); err != nil {
+	if err := enableSharding(ruler, ringStore); err != nil {
 		return nil, errors.Wrap(err, "setup ruler sharding ring")
 	}
 
@@ -310,7 +305,7 @@ func enableSharding(r *Ruler, ringStore kv.Client) error {
 
 	// Define lifecycler delegates in reverse order (last to be called defined first because they're
 	// chained via "next delegate").
-	delegate := ring.BasicLifecyclerDelegate(r)
+	delegate := ring.BasicLifecyclerDelegate(ring.NewInstanceRegisterDelegate(ring.ACTIVE, r.cfg.Ring.NumTokens))
 	delegate = ring.NewLeaveOnStoppingDelegate(delegate, r.logger)
 	delegate = ring.NewAutoForgetDelegate(r.cfg.Ring.HeartbeatTimeout*ringAutoForgetUnhealthyPeriods, delegate, r.logger)
 
@@ -364,39 +359,6 @@ func (r *Ruler) stopping(_ error) error {
 		_ = services.StopManagerAndAwaitStopped(context.Background(), r.subservices)
 	}
 	return nil
-}
-
-type sender interface {
-	Send(alerts ...*notifier.Alert)
-}
-
-// SendAlerts implements a rules.NotifyFunc for a Notifier.
-// It filters any non-firing alerts from the input.
-//
-// Copied from Prometheus's main.go.
-func SendAlerts(n sender, externalURL string) promRules.NotifyFunc {
-	return func(ctx context.Context, expr string, alerts ...*promRules.Alert) {
-		var res []*notifier.Alert
-
-		for _, alert := range alerts {
-			a := &notifier.Alert{
-				StartsAt:     alert.FiredAt,
-				Labels:       alert.Labels,
-				Annotations:  alert.Annotations,
-				GeneratorURL: externalURL + strutil.TableLinkForExpression(expr),
-			}
-			if !alert.ResolvedAt.IsZero() {
-				a.EndsAt = alert.ResolvedAt
-			} else {
-				a.EndsAt = alert.ValidUntil
-			}
-			res = append(res, a)
-		}
-
-		if len(alerts) > 0 {
-			n.Send(res...)
-		}
-	}
 }
 
 var sep = []byte("/")
@@ -461,6 +423,8 @@ func (r *Ruler) run(ctx context.Context) error {
 	}
 }
 
+// It's not safe to call this function concurrently.
+// We expect this function is only called from Ruler.run().
 func (r *Ruler) syncRules(ctx context.Context, reason string) {
 	level.Debug(r.logger).Log("msg", "syncing rules", "reason", reason)
 	r.metrics.rulerSync.WithLabelValues(reason).Inc()
@@ -476,6 +440,9 @@ func (r *Ruler) syncRules(ctx context.Context, reason string) {
 		level.Error(r.logger).Log("msg", "unable to load rules owned by this ruler", "err", err)
 		return
 	}
+
+	// Filter out all rules for which their evaluation has been disabled for the given tenant.
+	configs = filterRuleGroupsByEnabled(configs, r.limits, r.logger)
 
 	// This will also delete local group files for users that are no longer in 'configs' map.
 	r.manager.SyncRuleGroups(ctx, configs)
@@ -559,7 +526,7 @@ func (r *Ruler) listRulesSharded(ctx context.Context) (map[string]rulespb.RuleGr
 					return errors.Wrapf(err, "failed to fetch rule groups for user %s", userID)
 				}
 
-				filtered := filterRuleGroups(userID, groups, userRings[userID], r.lifecycler.GetInstanceAddr(), r.logger, r.metrics.ringCheckErrors)
+				filtered := filterRuleGroupsByOwnership(userID, groups, userRings[userID], r.lifecycler.GetInstanceAddr(), r.logger, r.metrics.ringCheckErrors)
 				if len(filtered) == 0 {
 					continue
 				}
@@ -576,12 +543,12 @@ func (r *Ruler) listRulesSharded(ctx context.Context) (map[string]rulespb.RuleGr
 	return result, err
 }
 
-// filterRuleGroups returns map of rule groups that given instance "owns" based on supplied ring.
+// filterRuleGroupsByOwnership returns map of rule groups that given instance "owns" based on supplied ring.
 // This function only uses User, Namespace, and Name fields of individual RuleGroups.
 //
 // Reason why this function is not a method on Ruler is to make sure we don't accidentally use r.ring,
 // but only ring passed as parameter.
-func filterRuleGroups(userID string, ruleGroups []*rulespb.RuleGroupDesc, ring ring.ReadRing, instanceAddr string, log log.Logger, ringCheckErrors prometheus.Counter) []*rulespb.RuleGroupDesc {
+func filterRuleGroupsByOwnership(userID string, ruleGroups []*rulespb.RuleGroupDesc, ring ring.ReadRing, instanceAddr string, log log.Logger, ringCheckErrors prometheus.Counter) []*rulespb.RuleGroupDesc {
 	// Prune the rule group to only contain rules that this ruler is responsible for, based on ring.
 	var result []*rulespb.RuleGroupDesc
 	for _, g := range ruleGroups {
@@ -601,6 +568,125 @@ func filterRuleGroups(userID string, ruleGroups []*rulespb.RuleGroupDesc, ring r
 	}
 
 	return result
+}
+
+// filterRuleGroupsByEnabled filters out from the input configs all the recording and/or alerting rules whose evaluation
+// has been disabled for the given tenant.
+//
+// This function doesn't modify the input configs in place (even if it could) in order to reduce the likelihood of introducing
+// future bugs, in case the rule groups will be cached in memory.
+func filterRuleGroupsByEnabled(configs map[string]rulespb.RuleGroupList, limits RulesLimits, logger log.Logger) (filtered map[string]rulespb.RuleGroupList) {
+	// Quick case: nothing if do if no user has rules disabled.
+	shouldFilter := false
+	for userID := range configs {
+		recordingEnabled := limits.RulerRecordingRulesEvaluationEnabled(userID)
+		alertingEnabled := limits.RulerAlertingRulesEvaluationEnabled(userID)
+
+		if !recordingEnabled || !alertingEnabled {
+			shouldFilter = true
+			break
+		}
+	}
+
+	if !shouldFilter {
+		return configs
+	}
+
+	// Filter out disabled rules.
+	filtered = make(map[string]rulespb.RuleGroupList, len(configs))
+
+	for userID, groups := range configs {
+		recordingEnabled := limits.RulerRecordingRulesEvaluationEnabled(userID)
+		alertingEnabled := limits.RulerAlertingRulesEvaluationEnabled(userID)
+
+		// Quick case: nothing to do if all rules are enabled.
+		if recordingEnabled && alertingEnabled {
+			filtered[userID] = groups
+			continue
+		}
+
+		// Quick case: remove the user at all if all rules are disabled.
+		if !recordingEnabled && !alertingEnabled {
+			// We don't expect rules evaluation to be disabled for the normal use case. For this reason,
+			// when it's disabled we prefer to log it with "info" instead of "debug" to make it more visible.
+			level.Info(logger).Log(
+				"msg", "filtered out all rules because evaluation is disabled for the tenant",
+				"user", userID,
+				"recording_rules_enabled", recordingEnabled,
+				"alerting_rules_enabled", alertingEnabled)
+			continue
+		}
+
+		filtered[userID] = make(rulespb.RuleGroupList, 0, len(groups))
+		removedRulesTotal := 0
+
+		for _, group := range groups {
+			filteredGroup, removedRules := filterRuleGroupByEnabled(group, recordingEnabled, alertingEnabled)
+			if filteredGroup != nil {
+				filtered[userID] = append(filtered[userID], filteredGroup)
+			}
+
+			removedRulesTotal += removedRules
+		}
+
+		if removedRulesTotal > 0 {
+			// We don't expect rules evaluation to be disabled for the normal use case. For this reason,
+			// when it's disabled we prefer to log it with "info" instead of "debug" to make it more visible.
+			level.Info(logger).Log(
+				"msg", "filtered out rules because evaluation is disabled for the tenant",
+				"user", userID,
+				"removed_rules", removedRulesTotal,
+				"recording_rules_enabled", recordingEnabled,
+				"alerting_rules_enabled", alertingEnabled)
+		}
+	}
+
+	return filtered
+}
+
+func filterRuleGroupByEnabled(group *rulespb.RuleGroupDesc, recordingEnabled, alertingEnabled bool) (filtered *rulespb.RuleGroupDesc, removedRules int) {
+	// Check if there are actually rules to be removed.
+	for _, rule := range group.Rules {
+		if rule.Record != "" && !recordingEnabled {
+			removedRules++
+		} else if rule.Alert != "" && !alertingEnabled {
+			removedRules++
+		}
+	}
+
+	// Quick case: no rules to remove.
+	if removedRules == 0 {
+		return group, 0
+	}
+
+	// Quick case: all rules to remove.
+	if removedRules == len(group.Rules) {
+		return nil, removedRules
+	}
+
+	// Create a copy of the group and remove some rules.
+	filtered = &rulespb.RuleGroupDesc{
+		Name:          group.Name,
+		Namespace:     group.Namespace,
+		Interval:      group.Interval,
+		Rules:         make([]*rulespb.RuleDesc, 0, len(group.Rules)-removedRules),
+		User:          group.User,
+		Options:       group.Options,
+		SourceTenants: group.SourceTenants,
+	}
+
+	for _, rule := range group.Rules {
+		if rule.Record != "" && !recordingEnabled {
+			continue
+		}
+		if rule.Alert != "" && !alertingEnabled {
+			continue
+		}
+
+		filtered.Rules = append(filtered.Rules, rule)
+	}
+
+	return filtered, removedRules
 }
 
 // GetRules retrieves the running rules from this ruler and all running rulers in the ring.

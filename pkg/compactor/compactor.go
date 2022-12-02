@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -27,11 +26,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
 	"github.com/grafana/mimir/pkg/storage/tsdb/bucketindex"
 	"github.com/grafana/mimir/pkg/util"
 	util_log "github.com/grafana/mimir/pkg/util/log"
@@ -45,10 +44,6 @@ const (
 const (
 	blocksMarkedForDeletionName = "cortex_compactor_blocks_marked_for_deletion_total"
 	blocksMarkedForDeletionHelp = "Total number of blocks marked for deletion in compactor."
-
-	// PartialUploadThresholdAge is a time after partial block is assumed aborted and ready to be cleaned.
-	// Keep it long as it is based on block creation time not upload start time.
-	PartialUploadThresholdAge = 2 * 24 * time.Hour
 )
 
 var (
@@ -127,12 +122,12 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	cfg.retryMaxBackoff = time.Minute
 
 	f.Var(&cfg.BlockRanges, "compactor.block-ranges", "List of compaction time ranges.")
-	f.DurationVar(&cfg.ConsistencyDelay, "compactor.consistency-delay", 0, fmt.Sprintf("Minimum age of fresh (non-compacted) blocks before they are being processed. Malformed blocks older than the maximum of consistency-delay and %s will be removed.", PartialUploadThresholdAge))
+	f.DurationVar(&cfg.ConsistencyDelay, "compactor.consistency-delay", 0, "Minimum age of fresh (non-compacted) blocks before they are being processed.")
 	f.IntVar(&cfg.BlockSyncConcurrency, "compactor.block-sync-concurrency", 8, "Number of Go routines to use when downloading blocks for compaction and uploading resulting blocks.")
 	f.IntVar(&cfg.MetaSyncConcurrency, "compactor.meta-sync-concurrency", 20, "Number of Go routines to use when syncing block meta files from the long term storage.")
 	f.StringVar(&cfg.DataDir, "compactor.data-dir", "./data-compactor/", "Directory to temporarily store blocks during compaction. This directory is not required to be persisted between restarts.")
 	f.DurationVar(&cfg.CompactionInterval, "compactor.compaction-interval", time.Hour, "The frequency at which the compaction runs")
-	f.DurationVar(&cfg.MaxCompactionTime, "compactor.max-compaction-time", 0, "Max time for starting compactions for a single tenant. After this time no new compactions for the tenant are started before next compaction cycle. This can help in multi-tenant environments to avoid single tenant using all compaction time, but also in single-tenant environments to force new discovery of blocks more often. 0 = disabled.")
+	f.DurationVar(&cfg.MaxCompactionTime, "compactor.max-compaction-time", time.Hour, "Max time for starting compactions for a single tenant. After this time no new compactions for the tenant are started before next compaction cycle. This can help in multi-tenant environments to avoid single tenant using all compaction time, but also in single-tenant environments to force new discovery of blocks more often. 0 = disabled.")
 	f.IntVar(&cfg.CompactionRetries, "compactor.compaction-retries", 3, "How many times to retry a failed compaction within a single compaction run.")
 	f.IntVar(&cfg.CompactionConcurrency, "compactor.compaction-concurrency", 1, "Max number of concurrent compactions running.")
 	f.DurationVar(&cfg.CleanupInterval, "compactor.cleanup-interval", 15*time.Minute, "How frequently compactor should run blocks cleanup and maintenance, as well as update the bucket index.")
@@ -192,6 +187,14 @@ type ConfigProvider interface {
 
 	// CompactorTenantShardSize returns number of compactors that this user can use. 0 = all compactors.
 	CompactorTenantShardSize(userID string) int
+
+	// CompactorPartialBlockDeletionDelay returns the partial block delay time period for a given user,
+	// and whether the configured value was valid. If the value wasn't valid, the returned delay is the default one
+	// and the caller is responsible to warn the Mimir operator about it.
+	CompactorPartialBlockDeletionDelay(userID string) (delay time.Duration, valid bool)
+
+	// CompactorBlockUploadEnabled returns whether block upload is enabled for a given tenant.
+	CompactorBlockUploadEnabled(tenantID string) bool
 }
 
 // MultitenantCompactor is a multi-tenant TSDB blocks compactor based on Thanos.
@@ -636,7 +639,12 @@ func (c *MultitenantCompactor) compactUser(ctx context.Context, userID string) e
 	fetcherFilters := []block.MetadataFilter{
 		// Remove the ingester ID because we don't shard blocks anymore, while still
 		// honoring the shard ID if sharding was done in the past.
-		NewLabelRemoverFilter([]string{mimir_tsdb.IngesterIDExternalLabel}),
+		// Remove TenantID external label to make sure that we compact blocks with and without the label
+		// together.
+		NewLabelRemoverFilter([]string{
+			mimir_tsdb.DeprecatedTenantIDExternalLabel,
+			mimir_tsdb.DeprecatedIngesterIDExternalLabel,
+		}),
 		block.NewConsistencyDelayMetaFilter(ulogger, c.compactorCfg.ConsistencyDelay, reg),
 		excludeMarkedForDeletionFilter,
 		deduplicateBlocksFilter,
@@ -719,19 +727,13 @@ func (c *MultitenantCompactor) discoverUsersWithRetries(ctx context.Context) ([]
 }
 
 func (c *MultitenantCompactor) discoverUsers(ctx context.Context) ([]string, error) {
-	var users []string
-
-	err := c.bucketClient.Iter(ctx, "", func(entry string) error {
-		users = append(users, strings.TrimSuffix(entry, "/"))
-		return nil
-	})
-
-	return users, err
+	return mimir_tsdb.ListUsers(ctx, c.bucketClient)
 }
 
 // shardingStrategy describes whether compactor "owns" given user or job.
 type shardingStrategy interface {
 	compactorOwnUser(userID string) (bool, error)
+	// blocksCleanerOwnUser must be concurrency-safe
 	blocksCleanerOwnUser(userID string) (bool, error)
 	ownJob(job *Job) (bool, error)
 }
@@ -756,7 +758,7 @@ func newSplitAndMergeShardingStrategy(allowedTenants *util.AllowedTenants, ring 
 	}
 }
 
-// Only single instance in the subring can run blocks cleaner for given user.
+// Only single instance in the subring can run blocks cleaner for given user. blocksCleanerOwnUser is concurrency-safe.
 func (s *splitAndMergeShardingStrategy) blocksCleanerOwnUser(userID string) (bool, error) {
 	if !s.allowedTenants.IsAllowed(userID) {
 		return false, nil
@@ -823,7 +825,7 @@ func (c *MultitenantCompactor) metaSyncDirForUser(userID string) string {
 func (c *MultitenantCompactor) listTenantsWithMetaSyncDirectories() map[string]struct{} {
 	result := map[string]struct{}{}
 
-	files, err := ioutil.ReadDir(c.compactorCfg.DataDir)
+	files, err := os.ReadDir(c.compactorCfg.DataDir)
 	if err != nil {
 		return nil
 	}

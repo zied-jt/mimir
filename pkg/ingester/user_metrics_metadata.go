@@ -12,7 +12,6 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
-	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 // userMetricsMetadata allows metric metadata of a tenant to be held by the ingester.
@@ -47,7 +46,7 @@ func (mm *userMetricsMetadata) add(metric string, metadata *mimirpb.MetricMetada
 	if !ok {
 		// Verify that the user can create more metric metadata given we don't have a set for that metric name.
 		if err := mm.limiter.AssertMaxMetricsWithMetadataPerUser(mm.userID, len(mm.metricToMetadata)); err != nil {
-			validation.DiscardedMetadata.WithLabelValues(mm.userID, perUserMetadataLimit).Inc()
+			mm.metrics.discardedMetadataPerUserMetadataLimit.WithLabelValues(mm.userID).Inc()
 			return makeLimitError(perUserMetadataLimit, mm.limiter.FormatError(mm.userID, err))
 		}
 		set = metricMetadataSet{}
@@ -55,7 +54,7 @@ func (mm *userMetricsMetadata) add(metric string, metadata *mimirpb.MetricMetada
 	}
 
 	if err := mm.limiter.AssertMaxMetadataPerMetric(mm.userID, len(set)); err != nil {
-		validation.DiscardedMetadata.WithLabelValues(mm.userID, perMetricMetadataLimit).Inc()
+		mm.metrics.discardedMetadataPerMetricMetadataLimit.WithLabelValues(mm.userID).Inc()
 		return makeMetricLimitError(perMetricMetadataLimit, labels.FromStrings(labels.MetricName, metric), mm.limiter.FormatError(mm.userID, err))
 	}
 
@@ -93,6 +92,7 @@ func (mm *userMetricsMetadata) toClientMetadata() []*mimirpb.MetricMetadata {
 	r := make([]*mimirpb.MetricMetadata, 0, len(mm.metricToMetadata))
 	for _, set := range mm.metricToMetadata {
 		for m := range set {
+			m := m
 			r = append(r, &m)
 		}
 	}

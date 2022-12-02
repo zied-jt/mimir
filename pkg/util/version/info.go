@@ -18,15 +18,16 @@ import (
 // Build information. Populated at build-time.
 // Note: Removed BuildUser and BuildDate for reproducible builds
 var (
-	Version   string = "unknown"
-	Revision  string = "unknown"
-	Branch    string = "unknown"
-	GoVersion        = runtime.Version()
+	Version   = "unknown"
+	Revision  = "unknown"
+	Branch    = "unknown"
+	GoVersion = runtime.Version()
 )
 
 // NewCollector returns a collector that exports metrics about current version
 // information.
 func NewCollector(program string) prometheus.Collector {
+	//lint:ignore faillint In this case we want to just want to create the metric.
 	return prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Namespace: program,

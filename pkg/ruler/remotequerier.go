@@ -18,6 +18,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
+	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/grpcclient"
 	otgrpc "github.com/opentracing-contrib/go-grpc"
 	"github.com/opentracing/opentracing-go"
@@ -45,6 +46,8 @@ const (
 	mimeTypeFormPost = "application/x-www-form-urlencoded"
 
 	statusError = "error"
+
+	maxRequestRetries = 3
 )
 
 var userAgent = fmt.Sprintf("mimir/%s", version.Version)
@@ -55,7 +58,7 @@ type QueryFrontendConfig struct {
 	Address string `yaml:"address"`
 
 	// GRPCClientConfig contains gRPC specific config options.
-	GRPCClientConfig grpcclient.Config `yaml:"grpc_client_config"`
+	GRPCClientConfig grpcclient.Config `yaml:"grpc_client_config" doc:"description=Configures the gRPC client used to communicate between the rulers and query-frontends."`
 }
 
 func (c *QueryFrontendConfig) RegisterFlags(f *flag.FlagSet) {
@@ -92,6 +95,7 @@ type Middleware func(ctx context.Context, req *httpgrpc.HTTPRequest) error
 // RemoteQuerier executes read operations against a httpgrpc.HTTPClient.
 type RemoteQuerier struct {
 	client         httpgrpc.HTTPClient
+	timeout        time.Duration
 	middlewares    []Middleware
 	promHTTPPrefix string
 	logger         log.Logger
@@ -100,12 +104,14 @@ type RemoteQuerier struct {
 // NewRemoteQuerier creates and initializes a new RemoteQuerier instance.
 func NewRemoteQuerier(
 	client httpgrpc.HTTPClient,
+	timeout time.Duration,
 	prometheusHTTPPrefix string,
 	logger log.Logger,
 	middlewares ...Middleware,
 ) *RemoteQuerier {
 	return &RemoteQuerier{
 		client:         client,
+		timeout:        timeout,
 		middlewares:    middlewares,
 		promHTTPPrefix: prometheusHTTPPrefix,
 		logger:         logger,
@@ -147,13 +153,16 @@ func (q *RemoteQuerier) Read(ctx context.Context, query *prompb.Query) (*prompb.
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, q.timeout)
+	defer cancel()
+
 	resp, err := q.client.Handle(ctx, &req)
 	if err != nil {
 		level.Warn(log).Log("msg", "failed to perform remote read", "err", err, "qs", query)
 		return nil, err
 	}
 	if resp.Code/100 != 2 {
-		return nil, fmt.Errorf("unexpected response status code %d: %s", resp.Code, string(resp.Body))
+		return nil, httpgrpc.Errorf(int(resp.Code), "unexpected response status code %d: %s", resp.Code, string(resp.Body))
 	}
 	level.Debug(log).Log("msg", "remote read successfully performed", "qs", query)
 
@@ -211,13 +220,16 @@ func (q *RemoteQuerier) query(ctx context.Context, query string, ts time.Time, l
 		}
 	}
 
-	resp, err := q.client.Handle(ctx, &req)
+	ctx, cancel := context.WithTimeout(ctx, q.timeout)
+	defer cancel()
+
+	resp, err := q.sendRequest(ctx, &req)
 	if err != nil {
 		level.Warn(logger).Log("msg", "failed to remotely evaluate query expression", "err", err, "qs", query, "tm", ts)
 		return model.ValNone, nil, err
 	}
 	if resp.Code/100 != 2 {
-		return model.ValNone, nil, fmt.Errorf("unexpected response status code %d: %s", resp.Code, string(resp.Body))
+		return model.ValNone, nil, httpgrpc.Errorf(int(resp.Code), "unexpected response status code %d: %s", resp.Code, string(resp.Body))
 	}
 	level.Debug(logger).Log("msg", "query expression successfully evaluated", "qs", query, "tm", ts)
 
@@ -242,6 +254,34 @@ func (q *RemoteQuerier) query(ctx context.Context, query string, ts time.Time, l
 		return model.ValNone, nil, err
 	}
 	return v.Type, v.Result, nil
+}
+
+func (q *RemoteQuerier) sendRequest(ctx context.Context, req *httpgrpc.HTTPRequest) (*httpgrpc.HTTPResponse, error) {
+	// Ongoing request may be cancelled during evaluation due to some transient error or server shutdown,
+	// so we'll keep retrying until we get a successful response or backoff is terminated.
+	retryConfig := backoff.Config{
+		MinBackoff: 100 * time.Millisecond,
+		MaxBackoff: 2 * time.Second,
+		MaxRetries: maxRequestRetries,
+	}
+	retry := backoff.New(ctx, retryConfig)
+
+	for {
+		resp, err := q.client.Handle(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		if !retry.Ongoing() {
+			return nil, err
+		}
+		level.Warn(q.logger).Log("msg", "failed to remotely evaluate query expression, will retry", "err", err)
+		retry.Wait()
+
+		// Avoid masking last known error if context was cancelled while waiting.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%s while retrying request, last err was: %w", ctx.Err(), err)
+		}
+	}
 }
 
 func decodeQueryResponse(valTyp model.ValueType, result json.RawMessage) (promql.Vector, error) {

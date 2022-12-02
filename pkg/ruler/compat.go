@@ -8,7 +8,6 @@ package ruler
 import (
 	"context"
 	"errors"
-	"net/http"
 	"time"
 
 	"github.com/go-kit/log"
@@ -18,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/notifier"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
@@ -58,6 +58,10 @@ func (a *PusherAppender) Append(_ storage.SeriesRef, l labels.Labels, t int64, v
 
 func (a *PusherAppender) AppendExemplar(_ storage.SeriesRef, _ labels.Labels, _ exemplar.Exemplar) (storage.SeriesRef, error) {
 	return 0, errors.New("exemplars are unsupported")
+}
+
+func (a *PusherAppender) UpdateMetadata(_ storage.SeriesRef, _ labels.Labels, _ metadata.Metadata) (storage.SeriesRef, error) {
+	return 0, errors.New("metadata updates are unsupported")
 }
 
 func (a *PusherAppender) Commit() error {
@@ -121,6 +125,8 @@ type RulesLimits interface {
 	RulerTenantShardSize(userID string) int
 	RulerMaxRuleGroupsPerTenant(userID string) int
 	RulerMaxRulesPerRuleGroup(userID string) int
+	RulerRecordingRulesEvaluationEnabled(userID string) bool
+	RulerAlertingRulesEvaluationEnabled(userID string) bool
 }
 
 func MetricsQueryFunc(qf rules.QueryFunc, queries, failedQueries prometheus.Counter) rules.QueryFunc {
@@ -151,9 +157,9 @@ func MetricsQueryFunc(qf rules.QueryFunc, queries, failedQueries prometheus.Coun
 			return result, origErr
 
 		} else if err != nil {
-			// When remote querier enabled, only consider failed queries those returning a 500 status code.
+			// When remote querier enabled, consider anything an error except those with 4xx status code.
 			st, ok := status.FromError(err)
-			if ok && st.Code() == http.StatusInternalServerError {
+			if !(ok && st.Code()/100 == 4) {
 				failedQueries.Inc()
 			}
 		}
@@ -255,7 +261,7 @@ func DefaultTenantManagerFactory(
 		}, []string{"user"})
 	}
 	return func(ctx context.Context, userID string, notifier *notifier.Manager, logger log.Logger, reg prometheus.Registerer) RulesManager {
-		var queryTime prometheus.Counter = nil
+		var queryTime prometheus.Counter
 		if rulerQuerySeconds != nil {
 			queryTime = rulerQuerySeconds.WithLabelValues(userID)
 		}
@@ -271,12 +277,13 @@ func DefaultTenantManagerFactory(
 			Context:                    user.InjectOrgID(ctx, userID),
 			GroupEvaluationContextFunc: FederatedGroupContextFunc,
 			ExternalURL:                cfg.ExternalURL.URL,
-			NotifyFunc:                 SendAlerts(notifier, cfg.ExternalURL.URL.String()),
+			NotifyFunc:                 rules.SendAlerts(notifier, cfg.ExternalURL.String()),
 			Logger:                     log.With(logger, "user", userID),
 			Registerer:                 reg,
 			OutageTolerance:            cfg.OutageTolerance,
 			ForGracePeriod:             cfg.ForGracePeriod,
 			ResendDelay:                cfg.ResendDelay,
+			AlwaysRestoreAlertState:    true,
 			DefaultEvaluationDelay: func() time.Duration {
 				// Delay the evaluation of all rules by a set interval to give a buffer
 				// to metric that haven't been forwarded to Mimir yet.

@@ -13,10 +13,13 @@ import (
 	"sort"
 	"time"
 
+	"github.com/prometheus/common/model"
+
 	"github.com/grafana-tools/sdk"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/grafana/mimir/pkg/mimirtool/analyze"
+	"github.com/grafana/mimir/pkg/mimirtool/minisdk"
 )
 
 type GrafanaAnalyzeCommand struct {
@@ -45,7 +48,12 @@ func (cmd *GrafanaAnalyzeCommand) run(k *kingpin.ParseContext) error {
 	}
 
 	for _, link := range boardLinks {
-		board, _, err := c.GetDashboardByUID(ctx, link.UID)
+		data, _, err := c.GetRawDashboardByUID(ctx, link.UID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s for %s %s\n", err, link.UID, link.Title)
+			continue
+		}
+		board, err := unmarshalDashboard(data, link)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s for %s %s\n", err, link.UID, link.Title)
 			continue
@@ -61,12 +69,21 @@ func (cmd *GrafanaAnalyzeCommand) run(k *kingpin.ParseContext) error {
 	return nil
 }
 
-func writeOut(mig *analyze.MetricsInGrafana, outputFile string) error {
-	var metricsUsed []string
-	for metric := range mig.OverallMetrics {
-		metricsUsed = append(metricsUsed, metric)
+func unmarshalDashboard(data []byte, link sdk.FoundBoard) (minisdk.Board, error) {
+	var board minisdk.Board
+	if err := json.Unmarshal(data, &board); err != nil {
+		return minisdk.Board{}, fmt.Errorf("can't unmarshal dashboard %s (%s): %w", link.UID, link.Title, err)
 	}
-	sort.Strings(metricsUsed)
+
+	return board, nil
+}
+
+func writeOut(mig *analyze.MetricsInGrafana, outputFile string) error {
+	var metricsUsed model.LabelValues
+	for metric := range mig.OverallMetrics {
+		metricsUsed = append(metricsUsed, model.LabelValue(metric))
+	}
+	sort.Sort(metricsUsed)
 
 	mig.MetricsUsed = metricsUsed
 	out, err := json.MarshalIndent(mig, "", "  ")
@@ -74,7 +91,7 @@ func writeOut(mig *analyze.MetricsInGrafana, outputFile string) error {
 		return err
 	}
 
-	if err := os.WriteFile(outputFile, out, os.FileMode(int(0666))); err != nil {
+	if err := os.WriteFile(outputFile, out, os.FileMode(int(0o666))); err != nil {
 		return err
 	}
 

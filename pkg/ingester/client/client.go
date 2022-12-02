@@ -16,11 +16,11 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
+//lint:ignore faillint It's non-trivial to remove this global variable.
 var ingesterClientRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-	Namespace: "cortex",
-	Name:      "ingester_client_request_duration_seconds",
-	Help:      "Time spent doing Ingester requests.",
-	Buckets:   prometheus.ExponentialBuckets(0.001, 4, 6),
+	Name:    "cortex_ingester_client_request_duration_seconds",
+	Help:    "Time spent doing Ingester requests.",
+	Buckets: prometheus.ExponentialBuckets(0.001, 4, 8),
 }, []string{"operation", "status_code"})
 
 // HealthAndIngesterClient is the union of IngesterClient and grpc_health_v1.HealthClient.
@@ -59,7 +59,7 @@ func (c *closableHealthAndIngesterClient) Close() error {
 
 // Config is the configuration struct for the ingester client
 type Config struct {
-	GRPCClientConfig grpcclient.Config `yaml:"grpc_client_config"`
+	GRPCClientConfig grpcclient.Config `yaml:"grpc_client_config" doc:"description=Configures the gRPC client used to communicate between distributors and ingesters."`
 }
 
 // RegisterFlags registers configuration settings used by the ingester client config.

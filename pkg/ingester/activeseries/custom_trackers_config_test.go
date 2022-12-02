@@ -3,13 +3,15 @@
 package activeseries
 
 import (
+	"bytes"
 	"flag"
+	"fmt"
 	"testing"
 
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 func mustNewCustomTrackersConfigFromMap(t *testing.T, source map[string]string) CustomTrackersConfig {
@@ -75,8 +77,8 @@ func TestCustomTrackersConfigs(t *testing.T) {
 			expected: mustNewCustomTrackersConfigFromMap(t, map[string]string{`foo`: `{foo="bar"}`}),
 		},
 		{
-			name: "whitespaces are trimmed from name and matcher",
-			flags: []string{`-ingester.active-series-custom-trackers= foo :	{foo="bar"}` + "\n "},
+			name:     "whitespaces are trimmed from name and matcher",
+			flags:    []string{`-ingester.active-series-custom-trackers= foo :      {foo="bar"}` + "\n "},
 			expected: mustNewCustomTrackersConfigFromMap(t, map[string]string{`foo`: `{foo="bar"}`}),
 		},
 		{
@@ -123,6 +125,34 @@ func TestCustomTrackersConfigs(t *testing.T) {
 			require.Equal(t, tc.expected, configAgain)
 		})
 	}
+}
+
+func TestMaximumNumberOfTrackers(t *testing.T) {
+	t.Run("Flag based setup", func(t *testing.T) {
+		var flagToSet bytes.Buffer
+		numberOfTrackers := maxNumberOfTrackers + 1
+		for i := 0; i < numberOfTrackers; i++ {
+			flagToSet.WriteString(fmt.Sprintf("name%d:{__name__=%d}", i, i))
+			if i < numberOfTrackers-1 {
+				flagToSet.WriteString(";")
+			}
+		}
+
+		c := CustomTrackersConfig{}
+		err := c.Set(flagToSet.String())
+		require.Error(t, err, "custom tracker config should not accept more than %d trackers", maxNumberOfTrackers)
+	})
+
+	t.Run("Map based setup", func(t *testing.T) {
+		configMap := map[string]string{}
+		numberOfTrackers := maxNumberOfTrackers + 1
+		for i := 0; i < numberOfTrackers; i++ {
+			configMap[fmt.Sprintf("name%d", i)] = fmt.Sprintf("{__name__=%d}", i)
+		}
+
+		_, err := NewCustomTrackersConfig(configMap)
+		require.Error(t, err, "custom tracker config should not accept more than %d trackers", maxNumberOfTrackers)
+	})
 }
 
 func TestCustomTrackerConfig_Equality(t *testing.T) {
@@ -203,5 +233,23 @@ func TestTrackersConfigs_Deserialization(t *testing.T) {
 		config := CustomTrackersConfig{}
 		err := yaml.Unmarshal([]byte(malformedInput), &config)
 		assert.Error(t, err, "should not deserialize malformed input")
+	})
+}
+
+func TestTrackersConfigs_SerializeDeserialize(t *testing.T) {
+	sourceYAML := `
+    baz: "{baz='bar'}"
+    foo: "{foo='bar'}"
+    `
+
+	obj := mustNewCustomTrackersConfigDeserializedFromYaml(t, sourceYAML)
+
+	t.Run("ShouldSerializeDeserializeResultsTheSame", func(t *testing.T) {
+		out, err := yaml.Marshal(obj)
+		require.NoError(t, err, "failed do serialize Custom trackers config")
+		reSerialized := CustomTrackersConfig{}
+		err = yaml.Unmarshal(out, &reSerialized)
+		require.NoError(t, err, "Failed to deserialize serialized object")
+		assert.Equal(t, obj, reSerialized)
 	})
 }

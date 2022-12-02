@@ -21,15 +21,14 @@ import (
 	"github.com/oklog/ulid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/extprom"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/grafana/mimir/pkg/compactor"
 	"github.com/grafana/mimir/pkg/storage/bucket"
-	"github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 	"github.com/grafana/mimir/pkg/util"
+	"github.com/grafana/mimir/pkg/util/extprom"
 )
 
 func main() {
@@ -41,7 +40,8 @@ func main() {
 		showCreationTime bool
 	}{}
 
-	cfg.bucket.RegisterFlags(flag.CommandLine)
+	logger := gokitlog.NewNopLogger()
+	cfg.bucket.RegisterFlags(flag.CommandLine, logger)
 	flag.StringVar(&cfg.userID, "user", "", "User (tenant)")
 	flag.Parse()
 
@@ -52,7 +52,6 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT)
 	defer cancel()
 
-	logger := gokitlog.NewNopLogger()
 	bkt, err := bucket.NewClient(ctx, cfg.bucket, "bucket", logger, nil)
 	if err != nil {
 		log.Fatalln("failed to create bucket:", err)
@@ -175,7 +174,7 @@ func printBlocks(metas map[ulid.ULID]*metadata.Meta) {
 	fmt.Fprintf(tabber, "Min Time\t")
 	fmt.Fprintf(tabber, "Max Time\t")
 	fmt.Fprintf(tabber, "Duration\t")
-	fmt.Fprintf(tabber, "Labels (excl. "+tsdb.TenantIDExternalLabel+")\t")
+	fmt.Fprintf(tabber, "Labels\t")
 	fmt.Fprintln(tabber)
 
 	for _, b := range blocks {
@@ -183,7 +182,7 @@ func printBlocks(metas map[ulid.ULID]*metadata.Meta) {
 		fmt.Fprintf(tabber, "%v\t", util.TimeFromMillis(b.MinTime).UTC().Format(time.RFC3339))
 		fmt.Fprintf(tabber, "%v\t", util.TimeFromMillis(b.MaxTime).UTC().Format(time.RFC3339))
 		fmt.Fprintf(tabber, "%v\t", util.TimeFromMillis(b.MaxTime).Sub(util.TimeFromMillis(b.MinTime)))
-		fmt.Fprintf(tabber, "%s\t", labels.FromMap(b.Thanos.Labels).WithoutLabels(tsdb.TenantIDExternalLabel))
+		fmt.Fprintf(tabber, "%s\t", labels.FromMap(b.Thanos.Labels))
 		fmt.Fprintln(tabber)
 	}
 }

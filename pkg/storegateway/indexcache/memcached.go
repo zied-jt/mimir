@@ -18,9 +18,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/thanos-io/thanos/pkg/cacheutil"
 	"golang.org/x/crypto/blake2b"
 
+	"github.com/grafana/mimir/pkg/cacheutil"
 	"github.com/grafana/mimir/pkg/storage/sharding"
 )
 
@@ -200,7 +200,9 @@ func (c *MemcachedIndexCache) FetchMultiSeriesForRefs(ctx context.Context, userI
 }
 
 func seriesForRefCacheKey(userID string, blockID ulid.ULID, id storage.SeriesRef) string {
-	return "S:" + userID + ":" + blockID.String() + ":" + strconv.FormatUint(uint64(id), 10)
+	// Max uint64 string representation is no longer than 20 characters.
+	b := make([]byte, 0, 20)
+	return "S:" + userID + ":" + blockID.String() + ":" + string(strconv.AppendUint(b, uint64(id), 10))
 }
 
 // StoreExpandedPostings stores the encoded result of ExpandedPostings for specified matchers identified by the provided LabelMatchersKey.

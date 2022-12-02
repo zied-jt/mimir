@@ -3,13 +3,12 @@
   local containerPort = $.core.v1.containerPort,
 
   distributor_args::
+    $._config.usageStatsConfig +
     $._config.grpcConfig +
     $._config.ingesterRingClientConfig +
     $._config.distributorLimitsConfig +
     {
       target: 'distributor',
-
-      'runtime-config.file': '%s/overrides.yaml' % $._config.overrides_configmap_mountpoint,
 
       'distributor.ha-tracker.enable': true,
       'distributor.ha-tracker.enable-for-all-users': true,
@@ -31,7 +30,7 @@
       'distributor.ring.store': 'consul',
       'distributor.ring.consul.hostname': 'consul.%s.svc.cluster.local:8500' % $._config.namespace,
       'distributor.ring.prefix': '',
-    },
+    } + $.mimirRuntimeConfigFile,
 
   distributor_ports:: $.util.defaultPorts,
 
@@ -46,17 +45,17 @@
 
   local deployment = $.apps.v1.deployment,
 
-  distributor_deployment:
+  distributor_deployment: if !$._config.is_microservices_deployment_mode then null else
     deployment.new('distributor', 3, [$.distributor_container]) +
-    (if $._config.distributor_allow_multiple_replicas_on_same_node then {} else $.util.antiAffinity) +
-    $.util.configVolumeMount($._config.overrides_configmap, $._config.overrides_configmap_mountpoint) +
+    $.newMimirSpreadTopology('distributor', $._config.distributor_topology_spread_max_skew) +
+    $.mimirVolumeMounts +
     (if !std.isObject($._config.node_selector) then {} else deployment.mixin.spec.template.spec.withNodeSelectorMixin($._config.node_selector)) +
     deployment.mixin.spec.strategy.rollingUpdate.withMaxSurge(5) +
     deployment.mixin.spec.strategy.rollingUpdate.withMaxUnavailable(1),
 
   local service = $.core.v1.service,
 
-  distributor_service:
+  distributor_service: if !$._config.is_microservices_deployment_mode then null else
     $.util.serviceFor($.distributor_deployment, $._config.service_ignored_labels) +
     service.mixin.spec.withClusterIp('None'),
 }

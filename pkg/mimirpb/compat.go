@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/util/jsonutil"
 
 	"github.com/grafana/mimir/pkg/util"
 )
@@ -239,9 +240,9 @@ func SampleJsoniterEncode(ptr unsafe.Pointer, stream *jsoniter.Stream) {
 	}
 
 	stream.WriteArrayStart()
-	stream.WriteFloat64(float64(sample.TimestampMs) / float64(time.Second/time.Millisecond))
+	jsonutil.MarshalTimestamp(sample.TimestampMs, stream)
 	stream.WriteMore()
-	stream.WriteString(model.SampleValue(sample.Value).String())
+	jsonutil.MarshalValue(sample.Value, stream)
 	stream.WriteArrayEnd()
 }
 

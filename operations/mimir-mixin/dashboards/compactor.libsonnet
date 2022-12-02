@@ -77,7 +77,6 @@ local fixTargetsForTransformations(panel, refIds) = panel {
         ['%s' % $._config.per_instance_label]: 'Compactor',
       },
     }),
-    $.transformationCalculateField('Status', 'Last run', '*', 1),  // Duplicate field to be transformed
     $.transformation('sortBy', {
       sort: [
         {
@@ -204,11 +203,17 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           targets: [target { format: 'table', instant: true } for target in super.targets],
           transformations:
             lastRunCommonTransformations +
-            [$.transformation('filterFieldsByName', {
-              include: {  // Only include these fields in the display
-                names: ['Compactor', 'Last run', 'Status'],
-              },
-            })],
+            [
+              // Grafana 8.5+ does not support constant numbers (e.g., 1), so we make a "One" field
+              $.transformationCalculateField('One', 'Last run', '/', 'Last run'),
+              // Duplicate field of "Last run" to provide "Status" text based on lastRunThresholds.mappings
+              $.transformationCalculateField('Status', 'Last run', '*', 'One'),
+              $.transformation('filterFieldsByName', {
+                include: {  // Only include these fields in the display
+                  names: ['Compactor', 'Last run', 'Status'],
+                },
+              }),
+            ],
           fieldConfig: {
             overrides: [
               $.overrideFieldByName('Status', [
@@ -285,8 +290,8 @@ local fixTargetsForTransformations(panel, refIds) = panel {
         { yaxes: $.yaxes('ops') },
       )
       .addPanel(
+        $.panel('Blocks deletions / sec') +
         $.successFailurePanel(
-          'Blocks deletions / sec',
           // The cortex_compactor_blocks_cleaned_total tracks the number of successfully
           // deleted blocks.
           |||
@@ -299,14 +304,16 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           ||| % {
             job: $.jobMatcher($._config.job_names.compactor),
           },
-        ) + { yaxes: $.yaxes('ops') }
+        ) +
+        $.stack +
+        { yaxes: $.yaxes('ops') }
       )
     )
     .addRow(
       $.row('Metadata sync')
       .addPanel(
+        $.panel('Metadata syncs / sec') +
         $.successFailurePanel(
-          'Metadata syncs / sec',
           // The cortex_compactor_meta_syncs_total metric is incremented each time a per-tenant
           // metadata sync is triggered.
           |||
@@ -321,7 +328,9 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           ||| % {
             job: $.jobMatcher($._config.job_names.compactor),
           },
-        ) + { yaxes: $.yaxes('ops') }
+        ) +
+        $.stack +
+        { yaxes: $.yaxes('ops') }
       )
       .addPanel(
         $.panel('Metadata sync duration') +

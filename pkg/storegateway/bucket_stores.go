@@ -8,11 +8,9 @@ package storegateway
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -24,23 +22,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/tsdb/hashcache"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/extprom"
-	"github.com/thanos-io/thanos/pkg/gate"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/pool"
-	"github.com/thanos-io/thanos/pkg/store/storepb"
+	"github.com/thanos-io/objstore"
 	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/logging"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	"github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
 	"github.com/grafana/mimir/pkg/storegateway/indexcache"
+	"github.com/grafana/mimir/pkg/storegateway/storepb"
+	"github.com/grafana/mimir/pkg/util/gate"
 	util_log "github.com/grafana/mimir/pkg/util/log"
+	"github.com/grafana/mimir/pkg/util/pool"
 	"github.com/grafana/mimir/pkg/util/spanlogger"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
+
+// GrpcContextMetadataTenantID is a key for GRPC Metadata used to pass tenant ID to store-gateway process.
+// (This is now separate from DeprecatedTenantIDExternalLabel to signify different use case.)
+const GrpcContextMetadataTenantID = "__org_id__"
 
 // BucketStores is a multi-tenant wrapper of Thanos BucketStore.
 type BucketStores struct {
@@ -89,12 +90,14 @@ func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStra
 	}
 
 	// The number of concurrent queries against the tenants BucketStores are limited.
-	queryGateReg := extprom.WrapRegistererWithPrefix("cortex_bucket_stores_", reg)
-	queryGate := gate.New(queryGateReg, cfg.BucketStore.MaxConcurrent)
-	promauto.With(reg).NewGauge(prometheus.GaugeOpts{
-		Name: "cortex_bucket_stores_gate_queries_concurrent_max",
-		Help: "Number of maximum concurrent queries allowed.",
-	}).Set(float64(cfg.BucketStore.MaxConcurrent))
+	queryGateReg := prometheus.WrapRegistererWithPrefix("cortex_bucket_stores_", reg)
+	var queryGate gate.Gate
+	if cfg.BucketStore.MaxConcurrentRejectOverLimit {
+		queryGate = gate.NewRejecting(cfg.BucketStore.MaxConcurrent)
+	} else {
+		queryGate = gate.NewBlocking(cfg.BucketStore.MaxConcurrent)
+	}
+	queryGate = gate.NewInstrumented(queryGateReg, cfg.BucketStore.MaxConcurrent, queryGate)
 
 	u := &BucketStores{
 		logger:             logger,
@@ -290,7 +293,7 @@ func (u *BucketStores) syncUsersBlocks(ctx context.Context, f func(context.Conte
 	return errs.Err()
 }
 
-// Series makes a series request to the underlying user bucket store.
+// Series implements the storepb.StoreServer interface, making a series request to the underlying user bucket store.
 func (u *BucketStores) Series(req *storepb.SeriesRequest, srv storepb.Store_SeriesServer) error {
 	spanLog, spanCtx := spanlogger.NewWithLogger(srv.Context(), u.logger, "BucketStores.Series")
 	defer spanLog.Span.Finish()
@@ -311,7 +314,7 @@ func (u *BucketStores) Series(req *storepb.SeriesRequest, srv storepb.Store_Seri
 	})
 }
 
-// LabelNames implements the Storegateway proto service.
+// LabelNames implements the storepb.StoreServer interface.
 func (u *BucketStores) LabelNames(ctx context.Context, req *storepb.LabelNamesRequest) (*storepb.LabelNamesResponse, error) {
 	spanLog, spanCtx := spanlogger.NewWithLogger(ctx, u.logger, "BucketStores.LabelNames")
 	defer spanLog.Span.Finish()
@@ -329,7 +332,7 @@ func (u *BucketStores) LabelNames(ctx context.Context, req *storepb.LabelNamesRe
 	return store.LabelNames(ctx, req)
 }
 
-// LabelValues implements the Storegateway proto service.
+// LabelValues implements the storepb.StoreServer interface.
 func (u *BucketStores) LabelValues(ctx context.Context, req *storepb.LabelValuesRequest) (*storepb.LabelValuesResponse, error) {
 	spanLog, spanCtx := spanlogger.NewWithLogger(ctx, u.logger, "BucketStores.LabelValues")
 	defer spanLog.Span.Finish()
@@ -350,17 +353,7 @@ func (u *BucketStores) LabelValues(ctx context.Context, req *storepb.LabelValues
 // scanUsers in the bucket and return the list of found users. If an error occurs while
 // iterating the bucket, it may return both an error and a subset of the users in the bucket.
 func (u *BucketStores) scanUsers(ctx context.Context) ([]string, error) {
-	var users []string
-
-	// Iterate the bucket to find all users in the bucket. Due to how the bucket listing
-	// caching works, it's more likely to have a cache hit if there's no delay while
-	// iterating the bucket, so we do load all users in memory and later process them.
-	err := u.bucket.Iter(ctx, "", func(s string) error {
-		users = append(users, strings.TrimSuffix(s, "/"))
-		return nil
-	})
-
-	return users, err
+	return tsdb.ListUsers(ctx, u.bucket)
 }
 
 func (u *BucketStores) getStore(userID string) *BucketStore {
@@ -485,7 +478,7 @@ func (u *BucketStores) getOrCreateStore(userID string) (*BucketStore, error) {
 		u.partitioner,
 		u.cfg.BucketStore.BlockSyncConcurrency,
 		u.cfg.BucketStore.PostingOffsetsInMemSampling,
-		true, // Enable series hints.
+		u.cfg.BucketStore.IndexHeader,
 		u.cfg.BucketStore.IndexHeaderLazyLoadingEnabled,
 		u.cfg.BucketStore.IndexHeaderLazyLoadingIdleTimeout,
 		u.seriesHashCache,
@@ -505,7 +498,7 @@ func (u *BucketStores) getOrCreateStore(userID string) (*BucketStore, error) {
 // closeBucketStoreAndDeleteLocalFilesForExcludedTenants closes bucket store and removes local "sync" directories
 // for tenants that are not included in the current shard.
 func (u *BucketStores) closeBucketStoreAndDeleteLocalFilesForExcludedTenants(includeUserIDs map[string]struct{}) {
-	files, err := ioutil.ReadDir(u.cfg.BucketStore.SyncDir)
+	files, err := os.ReadDir(u.cfg.BucketStore.SyncDir)
 	if err != nil {
 		return
 	}
@@ -560,7 +553,7 @@ func getUserIDFromGRPCContext(ctx context.Context) string {
 		return ""
 	}
 
-	values := meta.Get(tsdb.TenantIDExternalLabel)
+	values := meta.Get(GrpcContextMetadataTenantID)
 	if len(values) != 1 {
 		return ""
 	}

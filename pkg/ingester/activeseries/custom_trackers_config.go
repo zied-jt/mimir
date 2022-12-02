@@ -4,11 +4,16 @@ package activeseries
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
 	amlabels "github.com/prometheus/alertmanager/pkg/labels"
+	"gopkg.in/yaml.v3"
 )
+
+// preAllocDynamicSlice is using uint16 to represent custom tracker matches
+const maxNumberOfTrackers = math.MaxUint16
 
 // CustomTrackersConfig configures active series custom trackers.
 // It can be set using a flag, or parsed from yaml.
@@ -123,9 +128,9 @@ func customTrackerFlagValueToMap(s string) (map[string]string, error) {
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
 // CustomTrackersConfig are marshaled in yaml as a map[string]string, with matcher names as keys and strings as matchers definitions.
-func (c *CustomTrackersConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *CustomTrackersConfig) UnmarshalYAML(value *yaml.Node) error {
 	stringMap := map[string]string{}
-	err := unmarshal(&stringMap)
+	err := value.DecodeWithOptions(&stringMap, yaml.DecodeOptions{KnownFields: true})
 	if err != nil {
 		return err
 	}
@@ -133,9 +138,17 @@ func (c *CustomTrackersConfig) UnmarshalYAML(unmarshal func(interface{}) error) 
 	return err
 }
 
+// MarshalYAML implements yaml.Marshaler.
+func (c CustomTrackersConfig) MarshalYAML() (interface{}, error) {
+	return c.source, nil
+}
+
 func NewCustomTrackersConfig(m map[string]string) (c CustomTrackersConfig, err error) {
 	c.source = m
 	c.config = map[string]labelsMatchers{}
+	if len(m) > maxNumberOfTrackers {
+		return c, fmt.Errorf("the number of trackers set [%d] exceeds the maximum number of trackers [%d]", len(m), maxNumberOfTrackers)
+	}
 	for name, matcher := range m {
 		sm, err := amlabels.ParseMatchers(matcher)
 		if err != nil {

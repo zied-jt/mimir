@@ -12,6 +12,7 @@ import (
 
 	"github.com/grafana/mimir/pkg/util"
 	util_math "github.com/grafana/mimir/pkg/util/math"
+	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 type ingesterMetrics struct {
@@ -49,6 +50,18 @@ type ingesterMetrics struct {
 	appenderAddDuration    prometheus.Histogram
 	appenderCommitDuration prometheus.Histogram
 	idleTsdbChecks         *prometheus.CounterVec
+
+	// Discarded samples
+	discardedSamplesSampleOutOfBounds    *prometheus.CounterVec
+	discardedSamplesSampleOutOfOrder     *prometheus.CounterVec
+	discardedSamplesSampleTooOld         *prometheus.CounterVec
+	discardedSamplesNewValueForTimestamp *prometheus.CounterVec
+	discardedSamplesPerUserSeriesLimit   *prometheus.CounterVec
+	discardedSamplesPerMetricSeriesLimit *prometheus.CounterVec
+
+	// Discarded metadata
+	discardedMetadataPerUserMetadataLimit   *prometheus.CounterVec
+	discardedMetadataPerMetricMetadataLimit *prometheus.CounterVec
 }
 
 func newIngesterMetrics(
@@ -79,6 +92,12 @@ func newIngesterMetrics(
 	idleTsdbChecks.WithLabelValues(string(tsdbDataRemovalFailed))
 	idleTsdbChecks.WithLabelValues(string(tsdbTenantMarkedForDeletion))
 	idleTsdbChecks.WithLabelValues(string(tsdbIdleClosed))
+
+	// Active series metrics are registered only if enabled.
+	var activeSeriesReg prometheus.Registerer
+	if activeSeriesEnabled {
+		activeSeriesReg = r
+	}
 
 	m := &ingesterMetrics{
 		ingestedSamples: promauto.With(r).NewCounterVec(prometheus.CounterOpts{
@@ -209,19 +228,19 @@ func newIngesterMetrics(
 		}),
 
 		// Not registered automatically, but only if activeSeriesEnabled is true.
-		activeSeriesLoading: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		activeSeriesLoading: promauto.With(activeSeriesReg).NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cortex_ingester_active_series_loading",
 			Help: "Indicates that active series configuration is being reloaded, and waiting to become stable. While this metric is non zero, values from active series metrics shouldn't be considered.",
 		}, []string{"user"}),
 
 		// Not registered automatically, but only if activeSeriesEnabled is true.
-		activeSeriesPerUser: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		activeSeriesPerUser: promauto.With(activeSeriesReg).NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cortex_ingester_active_series",
 			Help: "Number of currently active series per user.",
 		}, []string{"user"}),
 
 		// Not registered automatically, but only if activeSeriesEnabled is true.
-		activeSeriesCustomTrackersPerUser: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		activeSeriesCustomTrackersPerUser: promauto.With(activeSeriesReg).NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cortex_ingester_active_series_custom_tracker",
 			Help: "Number of currently active series matching a pre-configured label matchers per user.",
 		}, []string{"user", "name"}),
@@ -252,12 +271,16 @@ func newIngesterMetrics(
 		}),
 
 		idleTsdbChecks: idleTsdbChecks,
-	}
 
-	if activeSeriesEnabled && r != nil {
-		r.MustRegister(m.activeSeriesLoading)
-		r.MustRegister(m.activeSeriesPerUser)
-		r.MustRegister(m.activeSeriesCustomTrackersPerUser)
+		discardedSamplesSampleOutOfBounds:    validation.DiscardedSamplesCounter(r, sampleOutOfBounds),
+		discardedSamplesSampleOutOfOrder:     validation.DiscardedSamplesCounter(r, sampleOutOfOrder),
+		discardedSamplesSampleTooOld:         validation.DiscardedSamplesCounter(r, sampleTooOld),
+		discardedSamplesNewValueForTimestamp: validation.DiscardedSamplesCounter(r, newValueForTimestamp),
+		discardedSamplesPerUserSeriesLimit:   validation.DiscardedSamplesCounter(r, perUserSeriesLimit),
+		discardedSamplesPerMetricSeriesLimit: validation.DiscardedSamplesCounter(r, perMetricSeriesLimit),
+
+		discardedMetadataPerUserMetadataLimit:   validation.DiscardedMetadataCounter(r, perUserMetadataLimit),
+		discardedMetadataPerMetricMetadataLimit: validation.DiscardedMetadataCounter(r, perMetricMetadataLimit),
 	}
 
 	return m
@@ -268,6 +291,16 @@ func (m *ingesterMetrics) deletePerUserMetrics(userID string) {
 	m.ingestedSamplesFail.DeleteLabelValues(userID)
 	m.memMetadataCreatedTotal.DeleteLabelValues(userID)
 	m.memMetadataRemovedTotal.DeleteLabelValues(userID)
+
+	m.discardedSamplesSampleOutOfBounds.DeleteLabelValues(userID)
+	m.discardedSamplesSampleOutOfOrder.DeleteLabelValues(userID)
+	m.discardedSamplesSampleTooOld.DeleteLabelValues(userID)
+	m.discardedSamplesNewValueForTimestamp.DeleteLabelValues(userID)
+	m.discardedSamplesPerUserSeriesLimit.DeleteLabelValues(userID)
+	m.discardedSamplesPerMetricSeriesLimit.DeleteLabelValues(userID)
+
+	m.discardedMetadataPerUserMetadataLimit.DeleteLabelValues(userID)
+	m.discardedMetadataPerMetricMetadataLimit.DeleteLabelValues(userID)
 }
 
 func (m *ingesterMetrics) deletePerUserCustomTrackerMetrics(userID string, customTrackerMetrics []string) {
@@ -322,6 +355,8 @@ type tsdbMetrics struct {
 	tsdbReloadsFailed      *prometheus.Desc
 	tsdbTimeRetentionCount *prometheus.Desc
 	tsdbBlocksBytes        *prometheus.Desc
+
+	tsdbOOOAppendedSamples *prometheus.Desc
 
 	checkpointDeleteFail    *prometheus.Desc
 	checkpointDeleteTotal   *prometheus.Desc
@@ -436,7 +471,7 @@ func newTSDBMetrics(r prometheus.Registerer) *tsdbMetrics {
 			[]string{"operation"}, nil),
 		tsdbOOOHistogram: prometheus.NewDesc(
 			"cortex_ingester_tsdb_sample_out_of_order_delta_seconds",
-			"Delta in seconds by which a sample is considered out of order.",
+			"Delta in seconds by which a sample is considered out-of-order.",
 			nil, nil),
 		tsdbLoadedBlocks: prometheus.NewDesc(
 			"cortex_ingester_tsdb_blocks_loaded",
@@ -502,8 +537,13 @@ func newTSDBMetrics(r prometheus.Registerer) *tsdbMetrics {
 			[]string{"user"}, nil),
 		tsdbExemplarsOutOfOrder: prometheus.NewDesc(
 			"cortex_ingester_tsdb_exemplar_out_of_order_exemplars_total",
-			"Total number of out of order exemplar ingestion failed attempts.",
+			"Total number of out-of-order exemplar ingestion failed attempts.",
 			nil, nil),
+
+		tsdbOOOAppendedSamples: prometheus.NewDesc(
+			"cortex_ingester_tsdb_out_of_order_samples_appended_total",
+			"Total number of out-of-order samples appended.",
+			[]string{"user"}, nil),
 
 		memSeriesCreatedTotal: prometheus.NewDesc(
 			"cortex_ingester_memory_series_created_total",
@@ -565,6 +605,8 @@ func (sm *tsdbMetrics) Describe(out chan<- *prometheus.Desc) {
 	out <- sm.tsdbExemplarLastTs
 	out <- sm.tsdbExemplarsOutOfOrder
 
+	out <- sm.tsdbOOOAppendedSamples
+
 	out <- sm.memSeriesCreatedTotal
 	out <- sm.memSeriesRemovedTotal
 }
@@ -614,6 +656,8 @@ func (sm *tsdbMetrics) Collect(out chan<- prometheus.Metric) {
 	data.SendSumOfGaugesPerUser(out, sm.tsdbExemplarSeriesInStorage, "prometheus_tsdb_exemplar_series_with_exemplars_in_storage")
 	data.SendSumOfGaugesPerUser(out, sm.tsdbExemplarLastTs, "prometheus_tsdb_exemplar_last_exemplars_timestamp_seconds")
 	data.SendSumOfCounters(out, sm.tsdbExemplarsOutOfOrder, "prometheus_tsdb_exemplar_out_of_order_exemplars_total")
+
+	data.SendSumOfCountersPerUser(out, sm.tsdbOOOAppendedSamples, "prometheus_tsdb_head_out_of_order_samples_appended_total")
 
 	data.SendSumOfCountersPerUser(out, sm.memSeriesCreatedTotal, "prometheus_tsdb_head_series_created_total")
 	data.SendSumOfCountersPerUser(out, sm.memSeriesRemovedTotal, "prometheus_tsdb_head_series_removed_total")

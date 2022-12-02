@@ -6,14 +6,15 @@
 package mimir
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
-	"reflect"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -25,19 +26,23 @@ import (
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/runtimeconfig"
 	"github.com/grafana/dskit/services"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/promql"
 	prom_storage "github.com/prometheus/prometheus/storage"
 	"github.com/weaveworks/common/server"
 	"github.com/weaveworks/common/signals"
+	"go.opentelemetry.io/otel"
+	"go.uber.org/atomic"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
 	"github.com/grafana/dskit/tenant"
 
 	"github.com/grafana/mimir/pkg/alertmanager"
 	"github.com/grafana/mimir/pkg/alertmanager/alertstore"
+	alertbucketclient "github.com/grafana/mimir/pkg/alertmanager/alertstore/bucketclient"
 	alertstorelocal "github.com/grafana/mimir/pkg/alertmanager/alertstore/local"
 	"github.com/grafana/mimir/pkg/api"
 	"github.com/grafana/mimir/pkg/compactor"
@@ -53,11 +58,13 @@ import (
 	querier_worker "github.com/grafana/mimir/pkg/querier/worker"
 	"github.com/grafana/mimir/pkg/ruler"
 	"github.com/grafana/mimir/pkg/ruler/rulestore"
+	rulebucketclient "github.com/grafana/mimir/pkg/ruler/rulestore/bucketclient"
 	rulestorelocal "github.com/grafana/mimir/pkg/ruler/rulestore/local"
 	"github.com/grafana/mimir/pkg/scheduler"
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	"github.com/grafana/mimir/pkg/storage/tsdb"
 	"github.com/grafana/mimir/pkg/storegateway"
+	"github.com/grafana/mimir/pkg/usagestats"
 	"github.com/grafana/mimir/pkg/util"
 	"github.com/grafana/mimir/pkg/util/activitytracker"
 	util_log "github.com/grafana/mimir/pkg/util/log"
@@ -90,6 +97,7 @@ type Config struct {
 	Target              flagext.StringSliceCSV `yaml:"target"`
 	MultitenancyEnabled bool                   `yaml:"multitenancy_enabled"`
 	NoAuthTenant        string                 `yaml:"no_auth_tenant" category:"advanced"`
+	ShutdownDelay       time.Duration          `yaml:"shutdown_delay" category:"experimental"`
 	PrintConfig         bool                   `yaml:"-"`
 	ApplicationName     string                 `yaml:"-"`
 
@@ -116,6 +124,9 @@ type Config struct {
 	RuntimeConfig       runtimeconfig.Config                       `yaml:"runtime_config"`
 	MemberlistKV        memberlist.KVConfig                        `yaml:"memberlist"`
 	QueryScheduler      scheduler.Config                           `yaml:"query_scheduler"`
+	UsageStats          usagestats.Config                          `yaml:"usage_stats"`
+
+	Common CommonConfig `yaml:"common"`
 }
 
 // RegisterFlags registers flag.
@@ -123,6 +134,7 @@ func (c *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	c.ApplicationName = "Grafana Mimir"
 	c.Server.MetricsNamespace = "cortex"
 	c.Server.ExcludeRequestInLog = true
+	c.Server.DisableRequestSuccessLog = true
 
 	// Set the default module list to 'all'
 	c.Target = []string{All}
@@ -134,6 +146,7 @@ func (c *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	f.BoolVar(&c.MultitenancyEnabled, "auth.multitenancy-enabled", true, "When set to true, incoming HTTP requests must specify tenant ID in HTTP X-Scope-OrgId header. When set to false, tenant ID from -auth.no-auth-tenant is used instead.")
 	f.StringVar(&c.NoAuthTenant, "auth.no-auth-tenant", "anonymous", "Tenant ID to use when multitenancy is disabled.")
 	f.BoolVar(&c.PrintConfig, "print.config", false, "Print the config and exit.")
+	f.DurationVar(&c.ShutdownDelay, "shutdown-delay", 0, "How long to wait between SIGTERM and shutdown. After receiving SIGTERM, Mimir will report not-ready status via /ready endpoint.")
 
 	c.API.RegisterFlags(f)
 	c.registerServerFlagsWithChangedDefaultValues(f)
@@ -145,30 +158,57 @@ func (c *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	c.LimitsConfig.RegisterFlags(f)
 	c.Worker.RegisterFlags(f)
 	c.Frontend.RegisterFlags(f, logger)
-	c.BlocksStorage.RegisterFlags(f)
+	c.BlocksStorage.RegisterFlags(f, logger)
 	c.Compactor.RegisterFlags(f, logger)
 	c.StoreGateway.RegisterFlags(f, logger)
 	c.TenantFederation.RegisterFlags(f)
 
 	c.Ruler.RegisterFlags(f, logger)
-	c.RulerStorage.RegisterFlags(f)
+	c.RulerStorage.RegisterFlags(f, logger)
 	c.Alertmanager.RegisterFlags(f, logger)
-	c.AlertmanagerStorage.RegisterFlags(f)
+	c.AlertmanagerStorage.RegisterFlags(f, logger)
 	c.RuntimeConfig.RegisterFlags(f)
 	c.MemberlistKV.RegisterFlags(f)
 	c.ActivityTracker.RegisterFlags(f)
-	c.QueryScheduler.RegisterFlags(f)
+	c.QueryScheduler.RegisterFlags(f, logger)
+	c.UsageStats.RegisterFlags(f)
+
+	c.Common.RegisterFlags(f, logger)
+}
+
+func (c *Config) CommonConfigInheritance() CommonConfigInheritance {
+	return CommonConfigInheritance{
+		Storage: map[string]*bucket.StorageBackendConfig{
+			"blocks_storage":       &c.BlocksStorage.Bucket.StorageBackendConfig,
+			"ruler_storage":        &c.RulerStorage.StorageBackendConfig,
+			"alertmanager_storage": &c.AlertmanagerStorage.StorageBackendConfig,
+		},
+	}
+}
+
+// ConfigWithCommon should be passed to yaml.Unmarshal to properly unmarshal Common values.
+// We don't implement UnmarshalYAML on Config itself because that would disallow inlining it in other configs.
+type ConfigWithCommon Config
+
+func (c *ConfigWithCommon) UnmarshalYAML(value *yaml.Node) error {
+	if err := UnmarshalCommonYAML(value, (*Config)(c)); err != nil {
+		return err
+	}
+
+	// Then unmarshal config in a standard way.
+	// This will override previously set common values by the specific ones, if they're provided.
+	// (YAML specific takes precedence over YAML common)
+	return value.DecodeWithOptions((*Config)(c), yaml.DecodeOptions{KnownFields: true})
 }
 
 // Validate the mimir config and return an error if the validation
 // doesn't pass
 func (c *Config) Validate(log log.Logger) error {
-	if err := c.validateYAMLEmptyNodes(); err != nil {
-		return err
-	}
-
 	if err := c.validateBucketConfigs(); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidBucketConfig, err)
+	}
+	if err := c.validateFilesystemPaths(log); err != nil {
+		return err
 	}
 	if err := c.RulerStorage.Validate(); err != nil {
 		return errors.Wrap(err, "invalid rulestore config")
@@ -185,14 +225,18 @@ func (c *Config) Validate(log log.Logger) error {
 	if err := c.Querier.Validate(); err != nil {
 		return errors.Wrap(err, "invalid querier config")
 	}
+	if c.Querier.EngineConfig.Timeout > c.Server.HTTPServerWriteTimeout {
+		return fmt.Errorf("querier timeout (%s) must be lower than or equal to HTTP server write timeout (%s)",
+			c.Querier.EngineConfig.Timeout, c.Server.HTTPServerWriteTimeout)
+	}
 	if err := c.IngesterClient.Validate(log); err != nil {
 		return errors.Wrap(err, "invalid ingester_client config")
 	}
 	if err := c.Worker.Validate(log); err != nil {
 		return errors.Wrap(err, "invalid frontend_worker config")
 	}
-	if err := c.Frontend.QueryMiddleware.Validate(); err != nil {
-		return errors.Wrap(err, "invalid query-frontend middleware config")
+	if err := c.Frontend.Validate(log); err != nil {
+		return errors.Wrap(err, "invalid query-frontend config")
 	}
 	if err := c.StoreGateway.Validate(c.LimitsConfig); err != nil {
 		return errors.Wrap(err, "invalid store-gateway config")
@@ -203,8 +247,14 @@ func (c *Config) Validate(log log.Logger) error {
 	if err := c.AlertmanagerStorage.Validate(); err != nil {
 		return errors.Wrap(err, "invalid alertmanager storage config")
 	}
-	if c.isModuleEnabled(AlertManager) {
-		if err := c.Alertmanager.Validate(c.AlertmanagerStorage); err != nil {
+	if err := c.QueryScheduler.Validate(); err != nil {
+		return errors.Wrap(err, "invalid query-scheduler config")
+	}
+	if err := c.UsageStats.Validate(); err != nil {
+		return errors.Wrap(err, "invalid usage stats config")
+	}
+	if c.isAnyModuleEnabled(AlertManager, Backend) {
+		if err := c.Alertmanager.Validate(); err != nil {
 			return errors.Wrap(err, "invalid alertmanager config")
 		}
 	}
@@ -225,43 +275,16 @@ func (c *Config) isAnyModuleEnabled(modules ...string) bool {
 	return false
 }
 
-// validateYAMLEmptyNodes ensure that no empty node has been specified in the YAML config file.
-// When an empty node is defined in YAML, the YAML parser sets the whole struct to its zero value
-// and so we loose all default values. It's very difficult to detect this case for the user, so we
-// try to prevent it (on the root level) with this custom validation.
-func (c *Config) validateYAMLEmptyNodes() error {
-	defaults := Config{}
-	flagext.DefaultValues(&defaults)
-
-	defStruct := reflect.ValueOf(defaults)
-	cfgStruct := reflect.ValueOf(*c)
-
-	// We expect all structs are the exact same. This check should never fail.
-	if cfgStruct.NumField() != defStruct.NumField() {
-		return errors.New("unable to validate configuration because of mismatching internal config data structure")
-	}
-
-	for i := 0; i < cfgStruct.NumField(); i++ {
-		// If the struct has been reset due to empty YAML value and the zero struct value
-		// doesn't match the default one, then we should warn the user about the issue.
-		if cfgStruct.Field(i).Kind() == reflect.Struct && cfgStruct.Field(i).IsZero() && !defStruct.Field(i).IsZero() {
-			return fmt.Errorf("the %s configuration in YAML has been specified as an empty YAML node", cfgStruct.Type().Field(i).Name)
-		}
-	}
-
-	return nil
-}
-
 func (c *Config) validateBucketConfigs() error {
 	errs := multierror.New()
 
 	// Validate alertmanager bucket config.
-	if c.isAnyModuleEnabled(AlertManager) && c.AlertmanagerStorage.Backend != alertstorelocal.Name {
+	if c.isAnyModuleEnabled(AlertManager, Backend) && c.AlertmanagerStorage.Backend != alertstorelocal.Name {
 		errs.Add(errors.Wrap(validateBucketConfig(c.AlertmanagerStorage.Config, c.BlocksStorage.Bucket), "alertmanager storage"))
 	}
 
 	// Validate ruler bucket config.
-	if c.isAnyModuleEnabled(All, Ruler) && c.RulerStorage.Backend != rulestorelocal.Name {
+	if c.isAnyModuleEnabled(All, Ruler, Backend) && c.RulerStorage.Backend != rulestorelocal.Name {
 		errs.Add(errors.Wrap(validateBucketConfig(c.RulerStorage.Config, c.BlocksStorage.Bucket), "ruler storage"))
 	}
 
@@ -305,39 +328,307 @@ func validateBucketConfig(cfg bucket.Config, blockStorageBucketCfg bucket.Config
 	return nil
 }
 
+// validateFilesystemPaths checks all configured filesystem paths and return error if it finds two of them
+// overlapping (Mimir expects all filesystem paths to not overlap).
+func (c *Config) validateFilesystemPaths(logger log.Logger) error {
+	type pathConfig struct {
+		name       string
+		cfgValue   string
+		checkValue string
+	}
+
+	var paths []pathConfig
+
+	// Blocks storage (check only for components using it).
+	if c.isAnyModuleEnabled(All, Write, Read, Backend, Ingester, Querier, StoreGateway, Compactor, Ruler) && c.BlocksStorage.Bucket.Backend == bucket.Filesystem {
+		// Add the optional prefix to the path, because that's the actual location where blocks will be stored.
+		paths = append(paths, pathConfig{
+			name:       "blocks storage filesystem directory",
+			cfgValue:   c.BlocksStorage.Bucket.Filesystem.Directory,
+			checkValue: filepath.Join(c.BlocksStorage.Bucket.Filesystem.Directory, c.BlocksStorage.Bucket.StoragePrefix),
+		})
+	}
+
+	// Ingester.
+	if c.isAnyModuleEnabled(All, Ingester, Write) {
+		paths = append(paths, pathConfig{
+			name:       "tsdb directory",
+			cfgValue:   c.BlocksStorage.TSDB.Dir,
+			checkValue: c.BlocksStorage.TSDB.Dir,
+		})
+	}
+
+	// Store-gateway.
+	if c.isAnyModuleEnabled(All, StoreGateway, Backend) {
+		paths = append(paths, pathConfig{
+			name:       "bucket store sync directory",
+			cfgValue:   c.BlocksStorage.BucketStore.SyncDir,
+			checkValue: c.BlocksStorage.BucketStore.SyncDir,
+		})
+	}
+
+	// Compactor.
+	if c.isAnyModuleEnabled(All, Compactor, Backend) {
+		paths = append(paths, pathConfig{
+			name:       "compactor data directory",
+			cfgValue:   c.Compactor.DataDir,
+			checkValue: c.Compactor.DataDir,
+		})
+	}
+
+	// Ruler.
+	if c.isAnyModuleEnabled(All, Ruler, Backend) {
+		paths = append(paths, pathConfig{
+			name:       "ruler data directory",
+			cfgValue:   c.Ruler.RulePath,
+			checkValue: c.Ruler.RulePath,
+		})
+
+		if c.RulerStorage.Backend == bucket.Filesystem {
+			// All ruler configuration is stored under an hardcoded prefix that we're taking in account here.
+			paths = append(paths, pathConfig{
+				name:       "ruler storage filesystem directory",
+				cfgValue:   c.RulerStorage.Filesystem.Directory,
+				checkValue: filepath.Join(c.RulerStorage.Filesystem.Directory, rulebucketclient.RulesPrefix),
+			})
+		}
+		if c.RulerStorage.Backend == rulestorelocal.Name {
+			paths = append(paths, pathConfig{
+				name:       "ruler storage local directory",
+				cfgValue:   c.RulerStorage.Local.Directory,
+				checkValue: c.RulerStorage.Local.Directory,
+			})
+		}
+	}
+
+	// Alertmanager.
+	if c.isAnyModuleEnabled(AlertManager) {
+		paths = append(paths, pathConfig{
+			name:       "alertmanager data directory",
+			cfgValue:   c.Alertmanager.DataDir,
+			checkValue: c.Alertmanager.DataDir,
+		})
+
+		if c.AlertmanagerStorage.Backend == bucket.Filesystem {
+			var (
+				name     = "alertmanager storage filesystem directory"
+				cfgValue = c.AlertmanagerStorage.Filesystem.Directory
+			)
+
+			// All ruler configuration is stored under an hardcoded prefix that we're taking into account here.
+			paths = append(paths, pathConfig{name: name, cfgValue: cfgValue, checkValue: filepath.Join(c.AlertmanagerStorage.Filesystem.Directory, alertbucketclient.AlertsPrefix)})
+			paths = append(paths, pathConfig{name: name, cfgValue: cfgValue, checkValue: filepath.Join(c.AlertmanagerStorage.Filesystem.Directory, alertbucketclient.AlertmanagerPrefix)})
+		}
+
+		if c.AlertmanagerStorage.Backend == alertstorelocal.Name {
+			paths = append(paths, pathConfig{
+				name:       "alertmanager storage local directory",
+				cfgValue:   c.AlertmanagerStorage.Local.Path,
+				checkValue: c.AlertmanagerStorage.Local.Path,
+			})
+		}
+	}
+
+	// Convert all check paths to absolute clean paths.
+	for idx, path := range paths {
+		abs, err := filepath.Abs(path.checkValue)
+		if err != nil {
+			// We prefer to log a warning instead of returning an error to ensure that if we're unable to
+			// run the sanity check Mimir could start anyway.
+			level.Warn(logger).Log("msg", "the configuration sanity check for the filesystem directory has been skipped because can't get the absolute path", "path", path, "err", err)
+			paths[idx].checkValue = ""
+			continue
+		}
+
+		paths[idx].checkValue = abs
+	}
+
+	for _, firstPath := range paths {
+		for _, secondPath := range paths {
+			// Skip the same config field.
+			if firstPath.name == secondPath.name {
+				continue
+			}
+
+			// Skip if we've been unable to get the absolute path of one of the two paths.
+			if firstPath.checkValue == "" || secondPath.checkValue == "" {
+				continue
+			}
+
+			if isAbsPathOverlapping(firstPath.checkValue, secondPath.checkValue) {
+				// Report the configured path in the error message, otherwise it's harder for the user to spot it.
+				return fmt.Errorf("the configured %s %q cannot overlap with the configured %s %q; please set different paths, also ensuring one is not a subdirectory of the other one", firstPath.name, firstPath.cfgValue, secondPath.name, secondPath.cfgValue)
+			}
+		}
+	}
+
+	return nil
+}
+
+// isAbsPathOverlapping returns whether the two input absolute paths overlap.
+func isAbsPathOverlapping(firstAbsPath, secondAbsPath string) bool {
+	firstBase, firstName := filepath.Split(firstAbsPath)
+	secondBase, secondName := filepath.Split(secondAbsPath)
+
+	if firstBase == secondBase {
+		// The base directories are the same, so they overlap if the last segment of the path (name)
+		// is the same or it's missing (happens when the input path is the root "/").
+		return firstName == secondName || firstName == "" || secondName == ""
+	}
+
+	// The base directories are different, but they could still overlap if one is the child of the other one.
+	return strings.HasPrefix(firstAbsPath, secondAbsPath) || strings.HasPrefix(secondAbsPath, firstAbsPath)
+}
+
 func (c *Config) registerServerFlagsWithChangedDefaultValues(fs *flag.FlagSet) {
 	throwaway := flag.NewFlagSet("throwaway", flag.PanicOnError)
 
 	// Register to throwaway flags first. Default values are remembered during registration and cannot be changed,
-	// but we can take values from throwaway flag set and reregister into supplied flags with new default values.
+	// but we can take values from throwaway flag set and re-register into supplied flag set with new default values.
 	c.Server.RegisterFlags(throwaway)
 
+	defaultsOverrides := map[string]string{
+		"server.http-write-timeout":                         "2m",
+		"server.grpc.keepalive.min-time-between-pings":      "10s",
+		"server.grpc.keepalive.ping-without-stream-allowed": "true",
+		"server.http-listen-port":                           "8080",
+		"server.grpc-max-recv-msg-size-bytes":               strconv.Itoa(100 * 1024 * 1024),
+		"server.grpc-max-send-msg-size-bytes":               strconv.Itoa(100 * 1024 * 1024),
+	}
+
 	throwaway.VisitAll(func(f *flag.Flag) {
-		// Ignore errors when setting new values. We have a test to verify that it works.
-		switch f.Name {
-		case "server.grpc.keepalive.min-time-between-pings":
-			_ = f.Value.Set("10s")
-
-		case "server.grpc.keepalive.ping-without-stream-allowed":
-			_ = f.Value.Set("true")
-
-		case "server.http-listen-port":
-			_ = f.Value.Set("8080")
-
-		case "server.grpc-max-recv-msg-size-bytes":
-			_ = f.Value.Set(strconv.Itoa(100 * 1024 * 1024))
-
-		case "server.grpc-max-send-msg-size-bytes":
-			_ = f.Value.Set(strconv.Itoa(100 * 1024 * 1024))
+		if defaultValue, overridden := defaultsOverrides[f.Name]; overridden {
+			// Ignore errors when setting new values. We have a test to verify that it works.
+			_ = f.Value.Set(defaultValue)
 		}
 
 		fs.Var(f.Value, f.Name, f.Usage)
 	})
 }
 
+// CommonConfigInheriter abstracts config that inherit common config values.
+type CommonConfigInheriter interface {
+	CommonConfigInheritance() CommonConfigInheritance
+}
+
+// UnmarshalCommonYAML provides the implementation for UnmarshalYAML functions to unmarshal the CommonConfig.
+// A list of CommonConfig inheriters can be provided
+func UnmarshalCommonYAML(value *yaml.Node, inheriters ...CommonConfigInheriter) error {
+	for _, inh := range inheriters {
+		specificStorageLocations := specificLocationsUnmarshaler{}
+		inheritance := inh.CommonConfigInheritance()
+		for name, loc := range inheritance.Storage {
+			specificStorageLocations[name] = loc
+		}
+
+		common := configWithCustomCommonUnmarshaler{
+			Common: &commonConfigUnmarshaler{
+				Storage: &specificStorageLocations,
+			},
+		}
+
+		if err := value.DecodeWithOptions(&common, yaml.DecodeOptions{KnownFields: true}); err != nil {
+			return fmt.Errorf("can't unmarshal common config: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// InheritCommonFlagValues will inherit the values of the provided common flags to all the inheriters.
+func InheritCommonFlagValues(log log.Logger, fs *flag.FlagSet, common CommonConfig, inheriters ...CommonConfigInheriter) error {
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	for _, inh := range inheriters {
+		inheritance := inh.CommonConfigInheritance()
+		for desc, loc := range inheritance.Storage {
+			if err := inheritFlags(log, common.Storage.RegisteredFlags, loc.RegisteredFlags, setFlags); err != nil {
+				return fmt.Errorf("can't inherit common flags for %q: %w", desc, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// inheritFlags takes flags from the origin set and sets them to the equivalent flags in the dest set, unless those are already set.
+func inheritFlags(log log.Logger, orig util.RegisteredFlags, dest util.RegisteredFlags, set map[string]bool) error {
+	for f, o := range orig.Flags {
+		d, ok := dest.Flags[f]
+		if !ok {
+			return fmt.Errorf("implementation error: flag %q was in flags prefixed with %q (%q) but was not in flags prefixed with %q (%q)", f, orig.Prefix, o.Name, dest.Prefix, d.Name)
+		}
+		if !set[o.Name] {
+			// Nothing to inherit because origin was not set.
+			continue
+		}
+		if set[d.Name] {
+			// Can't inherit because destination was set.
+			continue
+		}
+		if o.Value.String() == d.Value.String() {
+			// Already the same, no need to touch.
+			continue
+		}
+		level.Debug(log).Log(
+			"msg", "Inheriting flag value",
+			"origin_flag", o.Name, "origin_value", o.Value,
+			"destination_flag", d.Name, "destination_value", d.Value,
+		)
+		if err := d.Value.Set(o.Value.String()); err != nil {
+			return fmt.Errorf("can't set flag %q to flag's %q value %q: %s", d.Name, o.Name, o.Value, err)
+		}
+	}
+	return nil
+}
+
+type CommonConfig struct {
+	Storage bucket.StorageBackendConfig `yaml:"storage"`
+}
+
+type CommonConfigInheritance struct {
+	Storage map[string]*bucket.StorageBackendConfig
+}
+
+// RegisterFlags registers flag.
+func (c *CommonConfig) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
+	c.Storage.RegisterFlagsWithPrefix("common.storage.", f, logger)
+}
+
+// configWithCustomCommonUnmarshaler unmarshals config with custom unmarshaler for the `common` field.
+type configWithCustomCommonUnmarshaler struct {
+	// Common will unmarshal `common` yaml key using a custom unmarshaler.
+	Common *commonConfigUnmarshaler `yaml:"common"`
+	// Throwaway will contain the rest of the configuration options,
+	// so we can still use strict unmarshaling for common,
+	// but we won't complain about not knowing the rest of the config keys.
+	Throwaway map[string]interface{} `yaml:",inline"`
+}
+
+// commonConfigUnmarshaler will unmarshal each field of the common config into specific locations.
+type commonConfigUnmarshaler struct {
+	Storage *specificLocationsUnmarshaler `yaml:"storage"`
+}
+
+// specificLocationsUnmarshaler will unmarshal yaml into specific locations.
+// Keys are names (used to provide meaningful errors) and values are references to places
+// where this should be unmarshaled.
+type specificLocationsUnmarshaler map[string]interface{}
+
+func (m specificLocationsUnmarshaler) UnmarshalYAML(value *yaml.Node) error {
+	for l, v := range m {
+		if err := value.DecodeWithOptions(v, yaml.DecodeOptions{KnownFields: true}); err != nil {
+			return fmt.Errorf("key %q: %w", l, err)
+		}
+	}
+	return nil
+}
+
 // Mimir is the root datastructure for Mimir.
 type Mimir struct {
-	Cfg Config
+	Cfg        Config
+	Registerer prometheus.Registerer
 
 	// set during initialization
 	ServiceMap    map[string]services.Service
@@ -355,6 +646,7 @@ type Mimir struct {
 	RuntimeConfig            *runtimeconfig.Manager
 	QuerierQueryable         prom_storage.SampleAndChunkQueryable
 	ExemplarQueryable        prom_storage.ExemplarQueryable
+	MetadataSupplier         querier.MetadataSupplier
 	QuerierEngine            *promql.Engine
 	QueryFrontendTripperware querymiddleware.Tripperware
 	Ruler                    *ruler.Ruler
@@ -364,6 +656,7 @@ type Mimir struct {
 	StoreGateway             *storegateway.StoreGateway
 	MemberlistKV             *memberlist.KVInitService
 	ActivityTracker          *activitytracker.ActivityTracker
+	UsageStatsReporter       *usagestats.Reporter
 	BuildInfoHandler         http.Handler
 
 	// Queryables that the querier should use to query the long term storage.
@@ -371,7 +664,7 @@ type Mimir struct {
 }
 
 // New makes a new Mimir.
-func New(cfg Config) (*Mimir, error) {
+func New(cfg Config, reg prometheus.Registerer) (*Mimir, error) {
 	if cfg.PrintConfig {
 		if err := yaml.NewEncoder(os.Stdout).Encode(&cfg); err != nil {
 			fmt.Println("Error encoding config:", err)
@@ -399,11 +692,16 @@ func New(cfg Config) (*Mimir, error) {
 			"/schedulerpb.SchedulerForQuerier/NotifyQuerierShutdown",
 		}, cfg.NoAuthTenant)
 
+	// Inject the registerer in the Server config too.
+	cfg.Server.Registerer = reg
+
 	mimir := &Mimir{
-		Cfg: cfg,
+		Cfg:        cfg,
+		Registerer: reg,
 	}
 
-	mimir.setupThanosTracing()
+	mimir.setupObjstoreTracing()
+	otel.SetTracerProvider(NewOpenTelemetryProviderBridge(opentracing.GlobalTracer()))
 
 	if err := mimir.setupModuleManager(); err != nil {
 		return nil, err
@@ -412,9 +710,9 @@ func New(cfg Config) (*Mimir, error) {
 	return mimir, nil
 }
 
-// setupThanosTracing appends a gRPC middleware used to inject our tracer into the custom
-// context used by Thanos, in order to get Thanos spans correctly attached to our traces.
-func (t *Mimir) setupThanosTracing() {
+// setupObjstoreTracing appends a gRPC middleware used to inject our tracer into the custom
+// context used by thanos-io/objstore, in order to get Objstore spans correctly attached to our traces.
+func (t *Mimir) setupObjstoreTracing() {
 	t.Cfg.Server.GRPCMiddleware = append(t.Cfg.Server.GRPCMiddleware, ThanosTracerUnaryInterceptor)
 	t.Cfg.Server.GRPCStreamMiddleware = append(t.Cfg.Server.GRPCStreamMiddleware, ThanosTracerStreamInterceptor)
 }
@@ -423,14 +721,19 @@ func (t *Mimir) setupThanosTracing() {
 func (t *Mimir) Run() error {
 	// Register custom process metrics.
 	if c, err := process.NewProcessCollector(); err == nil {
-		prometheus.MustRegister(c)
+		if t.Registerer != nil {
+			t.Registerer.MustRegister(c)
+		}
 	} else {
 		level.Warn(util_log.Logger).Log("msg", "skipped registration of custom process metrics collector", "err", err)
 	}
 
+	// Update the usage stats before we initialize modules.
+	usagestats.SetTarget(t.Cfg.Target.String())
+
 	for _, module := range t.Cfg.Target {
 		if !t.ModuleManager.IsUserVisibleModule(module) {
-			level.Warn(util_log.Logger).Log("msg", "selected target is an internal module, is this intended?", "target", module)
+			return fmt.Errorf("selected target (%s) is an internal module, which is not allowed", module)
 		}
 	}
 
@@ -462,10 +765,15 @@ func (t *Mimir) Run() error {
 		return err
 	}
 
+	// Used to delay shutdown but return "not ready" during this delay.
+	shutdownRequested := atomic.NewBool(false)
+
 	// before starting servers, register /ready handler and gRPC health check service.
-	// It should reflect entire Mimir.
-	t.Server.HTTP.Path("/ready").Handler(t.readyHandler(sm))
-	grpc_health_v1.RegisterHealthServer(t.Server.GRPC, grpcutil.NewHealthCheck(sm))
+	t.Server.HTTP.Path("/ready").Handler(t.readyHandler(sm, shutdownRequested))
+	grpc_health_v1.RegisterHealthServer(t.Server.GRPC, grpcutil.NewHealthCheckFrom(
+		grpcutil.WithShutdownRequested(shutdownRequested),
+		grpcutil.WithManager(sm),
+	))
 
 	// Let's listen for events from this manager, and log them.
 	healthy := func() { level.Info(util_log.Logger).Log("msg", "Application started") }
@@ -477,7 +785,7 @@ func (t *Mimir) Run() error {
 		// let's find out which module failed
 		for m, s := range t.ServiceMap {
 			if s == service {
-				if service.FailureCase() == modules.ErrStopProcess {
+				if errors.Is(service.FailureCase(), modules.ErrStopProcess) {
 					level.Info(util_log.Logger).Log("msg", "received stop signal via return error", "module", m, "err", service.FailureCase())
 				} else {
 					level.Error(util_log.Logger).Log("msg", "module failed", "module", m, "err", service.FailureCase())
@@ -491,10 +799,18 @@ func (t *Mimir) Run() error {
 
 	sm.AddListener(services.NewManagerListener(healthy, stopped, serviceFailed))
 
-	// Setup signal handler. If signal arrives, we stop the manager, which stops all the services.
+	// Setup signal handler to gracefully shutdown in response to SIGTERM or SIGINT
 	handler := signals.NewHandler(t.Server.Log)
 	go func() {
 		handler.Loop()
+
+		shutdownRequested.Store(true)
+		t.Server.HTTPServer.SetKeepAlivesEnabled(false)
+
+		if t.Cfg.ShutdownDelay > 0 {
+			time.Sleep(t.Cfg.ShutdownDelay)
+		}
+
 		sm.StopAsync()
 	}()
 
@@ -513,7 +829,7 @@ func (t *Mimir) Run() error {
 	if err == nil {
 		if failed := sm.ServicesByState()[services.Failed]; len(failed) > 0 {
 			for _, f := range failed {
-				if f.FailureCase() != modules.ErrStopProcess {
+				if !errors.Is(f.FailureCase(), modules.ErrStopProcess) {
 					// Details were reported via failure listener before
 					err = errors.New("failed services")
 					break
@@ -524,18 +840,25 @@ func (t *Mimir) Run() error {
 	return err
 }
 
-func (t *Mimir) readyHandler(sm *services.Manager) http.HandlerFunc {
+func (t *Mimir) readyHandler(sm *services.Manager, shutdownRequested *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !sm.IsHealthy() {
-			msg := bytes.Buffer{}
-			msg.WriteString("Some services are not Running:\n")
+		if shutdownRequested.Load() {
+			level.Debug(util_log.Logger).Log("msg", "application is stopping")
+			http.Error(w, "Application is stopping", http.StatusServiceUnavailable)
+			return
+		}
 
-			byState := sm.ServicesByState()
-			for st, ls := range byState {
-				msg.WriteString(fmt.Sprintf("%v: %d\n", st, len(ls)))
+		if !sm.IsHealthy() {
+			var serviceNamesStates []string
+			for name, s := range t.ServiceMap {
+				if s.State() != services.Running {
+					serviceNamesStates = append(serviceNamesStates, fmt.Sprintf("%s: %s", name, s.State()))
+				}
 			}
 
-			http.Error(w, msg.String(), http.StatusServiceUnavailable)
+			level.Debug(util_log.Logger).Log("msg", "some services are not Running", "services", strings.Join(serviceNamesStates, ", "))
+			httpResponse := "Some services are not Running:\n" + strings.Join(serviceNamesStates, "\n")
+			http.Error(w, httpResponse, http.StatusServiceUnavailable)
 			return
 		}
 

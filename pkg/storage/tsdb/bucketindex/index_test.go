@@ -11,9 +11,9 @@ import (
 	"github.com/oklog/ulid"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/stretchr/testify/assert"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
 
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 )
 
 func TestIndex_RemoveBlock(t *testing.T) {
@@ -328,7 +328,6 @@ func TestBlock_Within(t *testing.T) {
 
 func TestBlock_ThanosMeta(t *testing.T) {
 	blockID := ulid.MustNew(1, nil)
-	userID := "user-1"
 
 	tests := map[string]struct {
 		block    Block
@@ -351,9 +350,6 @@ func TestBlock_ThanosMeta(t *testing.T) {
 				},
 				Thanos: metadata.Thanos{
 					Version: metadata.ThanosVersion1,
-					Labels: map[string]string{
-						"__org_id__": userID,
-					},
 					SegmentFiles: []string{
 						"000001",
 						"000002",
@@ -379,9 +375,6 @@ func TestBlock_ThanosMeta(t *testing.T) {
 				},
 				Thanos: metadata.Thanos{
 					Version: metadata.ThanosVersion1,
-					Labels: map[string]string{
-						"__org_id__": userID,
-					},
 				},
 			},
 		},
@@ -389,7 +382,7 @@ func TestBlock_ThanosMeta(t *testing.T) {
 
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
-			assert.Equal(t, testData.expected, testData.block.ThanosMeta(userID))
+			assert.Equal(t, testData.expected, testData.block.ThanosMeta())
 		})
 	}
 }

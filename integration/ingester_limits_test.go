@@ -49,7 +49,10 @@ func TestIngesterGlobalLimits(t *testing.T) {
 			require.NoError(t, err)
 			defer s.Close()
 
-			flags := BlocksStorageFlags()
+			flags := mergeFlags(
+				BlocksStorageFlags(),
+				BlocksStorageS3Flags(),
+			)
 			flags["-ingester.ring.replication-factor"] = "1"
 			flags["-distributor.ingestion-tenant-shard-size"] = strconv.Itoa(testData.tenantShardSize)
 			flags["-ingester.max-global-series-per-user"] = strconv.Itoa(testData.maxGlobalSeriesPerTenant)
@@ -88,7 +91,7 @@ func TestIngesterGlobalLimits(t *testing.T) {
 
 			// Try to push as many series with the same metric name as we can.
 			for i, errs := 0, 0; i < 10000; i++ {
-				series, _ := generateSeries("test_limit_per_metric", now, prompb.Label{
+				series, _, _ := generateSeries("test_limit_per_metric", now, prompb.Label{
 					Name:  "cardinality",
 					Value: strconv.Itoa(rand.Int()),
 				})
@@ -106,7 +109,7 @@ func TestIngesterGlobalLimits(t *testing.T) {
 
 			// Try to push as many series with the different metric name as we can.
 			for i, errs := 0, 0; i < 10000; i++ {
-				series, _ := generateSeries(fmt.Sprintf("test_limit_per_tenant_%d", rand.Int()), now)
+				series, _, _ := generateSeries(fmt.Sprintf("test_limit_per_tenant_%d", rand.Int()), now)
 				res, err := client.Push(series)
 				require.NoError(t, err)
 
@@ -177,7 +180,9 @@ overrides:
 				"-runtime-config.reload-period":                     "100ms",
 				"-blocks-storage.backend":                           "filesystem",
 				"-blocks-storage.filesystem.dir":                    "/tmp",
+				"-blocks-storage.storage-prefix":                    "blocks",
 				"-blocks-storage.bucket-store.bucket-index.enabled": "false",
+				"-ruler-storage.backend":                            "filesystem",
 				"-ruler-storage.local.directory":                    "/tmp", // Avoid warning "unable to list rules".
 				"-runtime-config.file":                              filepath.Join(e2e.ContainerSharedDir, overridesFile),
 			}

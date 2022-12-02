@@ -9,13 +9,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/gogo/status"
 	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/grpcclient"
-	dsmiddleware "github.com/grafana/dskit/middleware"
 	"github.com/grafana/dskit/ring/client"
 	"github.com/grafana/dskit/services"
 	otgrpc "github.com/opentracing-contrib/go-grpc"
@@ -111,13 +112,17 @@ func (sp *schedulerProcessor) processQueriesOnSingleStream(workerCtx context.Con
 		}
 
 		if err != nil {
-			level.Error(sp.log).Log("msg", "error contacting scheduler", "err", err, "addr", address)
+			level.Warn(sp.log).Log("msg", "error contacting scheduler", "err", err, "addr", address)
 			backoff.Wait()
 			continue
 		}
 
 		if err := sp.querierLoop(c, address, inflightQuery); err != nil {
-			level.Error(sp.log).Log("msg", "error processing requests from scheduler", "err", err, "addr", address)
+			// Do not log an error is the query-scheduler is shutting down.
+			if s, ok := status.FromError(err); !ok || !strings.Contains(s.Message(), schedulerpb.ErrSchedulerIsNotRunning.Error()) {
+				level.Error(sp.log).Log("msg", "error processing requests from scheduler", "err", err, "addr", address)
+			}
+
 			backoff.Wait()
 			continue
 		}
@@ -219,7 +224,7 @@ func (sp *schedulerProcessor) createFrontendClient(addr string) (client.PoolClie
 	opts, err := sp.grpcConfig.DialOption([]grpc.UnaryClientInterceptor{
 		otgrpc.OpenTracingClientInterceptor(opentracing.GlobalTracer()),
 		middleware.ClientUserHeaderInterceptor,
-		dsmiddleware.PrometheusGRPCUnaryInstrumentation(sp.frontendClientRequestDuration),
+		middleware.UnaryClientInstrumentInterceptor(sp.frontendClientRequestDuration),
 	}, nil)
 
 	if err != nil {

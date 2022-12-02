@@ -1,63 +1,14 @@
 local utils = import 'mixin-utils/utils.libsonnet';
 local filename = 'mimir-ruler.json';
 
-(import 'dashboard-utils.libsonnet') {
-  local ruler_config_api_routes_re = '(prometheus|api_prom)_(rules.*|api_v1_(rules|alerts))',
-
-  rulerQueries+:: {
-    ruleEvaluations: {
-      success:
-        |||
-          sum(rate(cortex_prometheus_rule_evaluations_total{%s}[$__rate_interval]))
-          -
-          sum(rate(cortex_prometheus_rule_evaluation_failures_total{%s}[$__rate_interval]))
-        |||,
-      failure: 'sum(rate(cortex_prometheus_rule_evaluation_failures_total{%s}[$__rate_interval]))',
-      latency:
-        |||
-          sum (rate(cortex_prometheus_rule_evaluation_duration_seconds_sum{%s}[$__rate_interval]))
-            /
-          sum (rate(cortex_prometheus_rule_evaluation_duration_seconds_count{%s}[$__rate_interval]))
-        |||,
-    },
-    perUserPerGroupEvaluations: {
-      failure: 'sum by(rule_group) (rate(cortex_prometheus_rule_evaluation_failures_total{%s}[$__rate_interval])) > 0',
-      latency:
-        |||
-          sum by(user) (rate(cortex_prometheus_rule_evaluation_duration_seconds_sum{%s}[$__rate_interval]))
-            /
-          sum by(user) (rate(cortex_prometheus_rule_evaluation_duration_seconds_count{%s}[$__rate_interval]))
-        |||,
-    },
-    groupEvaluations: {
-      missedIterations: 'sum by(user) (rate(cortex_prometheus_rule_group_iterations_missed_total{%s}[$__rate_interval])) > 0',
-      latency:
-        |||
-          rate(cortex_prometheus_rule_group_duration_seconds_sum{%s}[$__rate_interval])
-            /
-          rate(cortex_prometheus_rule_group_duration_seconds_count{%s}[$__rate_interval])
-        |||,
-    },
-    notifications: {
-      failure:
-        |||
-          sum by(user) (rate(cortex_prometheus_notifications_errors_total{%s}[$__rate_interval]))
-            /
-          sum by(user) (rate(cortex_prometheus_notifications_sent_total{%s}[$__rate_interval]))
-          > 0
-        |||,
-      queue:
-        |||
-          sum by(user) (rate(cortex_prometheus_notifications_queue_length{%s}[$__rate_interval]))
-            /
-          sum by(user) (rate(cortex_prometheus_notifications_queue_capacity{%s}[$__rate_interval])) > 0
-        |||,
-      dropped:
-        |||
-          sum by (user) (increase(cortex_prometheus_notifications_dropped_total{%s}[$__rate_interval])) > 0
-        |||,
-    },
-  },
+(import 'dashboard-utils.libsonnet') +
+(import 'dashboard-queries.libsonnet') {
+  local ruler_config_api_routes_re = '(%s)|(%s)' % [
+    // Prometheus API routes which are also exposed by Mimir.
+    '(api_prom_api_v1|prometheus_api_v1)_(rules|alerts|status_buildinfo)',
+    // Mimir-only API routes used for rule configuration.
+    '(api_prom|api_v1|prometheus|prometheus_config_v1)_rules.*',
+  ],
 
   [filename]:
     ($.dashboard('Ruler') + { uid: std.md5(filename) })
@@ -77,31 +28,33 @@ local filename = 'mimir-ruler.json';
       )
       .addPanel(
         $.panel('Read from ingesters - QPS') +
-        $.statPanel('sum(rate(cortex_ingester_client_request_duration_seconds_count{%s, operation="/cortex.Ingester/QueryStream"}[5m]))' % $.jobMatcher($._config.job_names.ruler), format='reqps')
+        $.statPanel('sum(rate(cortex_ingester_client_request_duration_seconds_count{%s, operation="/cortex.Ingester/QueryStream"}[$__rate_interval]))' % $.jobMatcher($._config.job_names.ruler), format='reqps')
       )
       .addPanel(
         $.panel('Write to ingesters - QPS') +
-        $.statPanel('sum(rate(cortex_ingester_client_request_duration_seconds_count{%s, operation="/cortex.Ingester/Push"}[5m]))' % $.jobMatcher($._config.job_names.ruler), format='reqps')
+        $.statPanel('sum(rate(cortex_ingester_client_request_duration_seconds_count{%s, operation="/cortex.Ingester/Push"}[$__rate_interval]))' % $.jobMatcher($._config.job_names.ruler), format='reqps')
       )
     )
     .addRow(
       $.row('Rule evaluations global')
       .addPanel(
-        $.panel('EPS') +
-        $.queryPanel(
+        $.panel('Evaluations per second') +
+        $.successFailureCustomPanel(
           [
-            $.rulerQueries.ruleEvaluations.success % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)],
-            $.rulerQueries.ruleEvaluations.failure % $.jobMatcher($._config.job_names.ruler),
+            $.queries.ruler.evaluations.successPerSecond,
+            $.queries.ruler.evaluations.failurePerSecond,
+            $.queries.ruler.evaluations.missedIterationsPerSecond,
           ],
-          ['success', 'failed'],
+          ['success', 'failed', 'missed'],
         ),
       )
       .addPanel(
         $.panel('Latency') +
         $.queryPanel(
-          $.rulerQueries.ruleEvaluations.latency % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)],
+          $.queries.ruler.evaluations.latency,
           'average'
-        ),
+        ) +
+        { yaxes: $.yaxes('s') },
       )
     )
     .addRowIf(
@@ -116,9 +69,11 @@ local filename = 'mimir-ruler.json';
         utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', ruler_config_api_routes_re)])
       )
       .addPanel(
+        local selectors = $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', ruler_config_api_routes_re)];
         $.panel('Per route p99 latency') +
         $.queryPanel(
-          'histogram_quantile(0.99, sum by (route, le) (%s_job_route:cortex_request_duration_seconds_bucket:sum_rate{%s, route=~"%s"}))' % [$._config.per_cluster_label, $.jobMatcher($._config.job_names.gateway), ruler_config_api_routes_re],
+          'histogram_quantile(0.99, sum by (route, le) (%s:cortex_request_duration_seconds_bucket:sum_rate%s))' %
+          [$.recordingRulePrefix(selectors), utils.toPrometheusSelector(selectors)],
           '{{ route }}'
         ) +
         { yaxes: $.yaxes('s') }
@@ -163,7 +118,7 @@ local filename = 'mimir-ruler.json';
       )
       .addPanel(
         $.panel('Consistency checks failed') +
-        $.queryPanel('sum(rate(cortex_querier_blocks_consistency_checks_failed_total{%s}[1m])) / sum(rate(cortex_querier_blocks_consistency_checks_total{%s}[1m]))' % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)], 'Failure Rate') +
+        $.failurePanel('sum(rate(cortex_querier_blocks_consistency_checks_failed_total{%s}[$__rate_interval])) / sum(rate(cortex_querier_blocks_consistency_checks_total{%s}[$__rate_interval]))' % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)], 'Failures / sec') +
         { yaxes: $.yaxes({ format: 'percentunit', max: 1 }) },
       )
     )
@@ -171,34 +126,50 @@ local filename = 'mimir-ruler.json';
       $.row('Notifications')
       .addPanel(
         $.panel('Delivery errors') +
-        $.queryPanel($.rulerQueries.notifications.failure % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)], '{{ user }}')
+        $.queryPanel(|||
+          sum by(user) (rate(cortex_prometheus_notifications_errors_total{%s}[$__rate_interval]))
+            /
+          sum by(user) (rate(cortex_prometheus_notifications_sent_total{%s}[$__rate_interval]))
+          > 0
+        ||| % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)], '{{ user }}')
       )
       .addPanel(
         $.panel('Queue length') +
-        $.queryPanel($.rulerQueries.notifications.queue % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)], '{{ user }}')
+        $.queryPanel(|||
+          sum by(user) (rate(cortex_prometheus_notifications_queue_length{%s}[$__rate_interval]))
+            /
+          sum by(user) (rate(cortex_prometheus_notifications_queue_capacity{%s}[$__rate_interval])) > 0
+        ||| % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)], '{{ user }}')
       )
       .addPanel(
         $.panel('Dropped') +
-        $.queryPanel($.rulerQueries.notifications.dropped % $.jobMatcher($._config.job_names.ruler), '{{ user }}')
+        $.queryPanel(|||
+          sum by (user) (increase(cortex_prometheus_notifications_dropped_total{%s}[$__rate_interval])) > 0
+        ||| % $.jobMatcher($._config.job_names.ruler), '{{ user }}')
       )
     )
     .addRow(
       ($.row('Group evaluations') + { collapse: true })
       .addPanel(
         $.panel('Missed iterations') +
-        $.queryPanel($.rulerQueries.groupEvaluations.missedIterations % $.jobMatcher($._config.job_names.ruler), '{{ user }}'),
+        $.queryPanel('sum by(user) (rate(cortex_prometheus_rule_group_iterations_missed_total{%s}[$__rate_interval])) > 0' % $.jobMatcher($._config.job_names.ruler), '{{ user }}'),
       )
       .addPanel(
         $.panel('Latency') +
         $.queryPanel(
-          $.rulerQueries.groupEvaluations.latency % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)],
+          |||
+            rate(cortex_prometheus_rule_group_duration_seconds_sum{%s}[$__rate_interval])
+              /
+            rate(cortex_prometheus_rule_group_duration_seconds_count{%s}[$__rate_interval])
+          ||| % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)],
           '{{ user }}'
-        ),
+        ) +
+        { yaxes: $.yaxes('s') },
       )
       .addPanel(
         $.panel('Failures') +
         $.queryPanel(
-          $.rulerQueries.perUserPerGroupEvaluations.failure % [$.jobMatcher($._config.job_names.ruler)], '{{ rule_group }}'
+          'sum by(rule_group) (rate(cortex_prometheus_rule_evaluation_failures_total{%s}[$__rate_interval])) > 0' % [$.jobMatcher($._config.job_names.ruler)], '{{ rule_group }}'
         )
       )
     )
@@ -207,9 +178,14 @@ local filename = 'mimir-ruler.json';
       .addPanel(
         $.panel('Latency') +
         $.queryPanel(
-          $.rulerQueries.perUserPerGroupEvaluations.latency % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)],
+          |||
+            sum by(user) (rate(cortex_prometheus_rule_evaluation_duration_seconds_sum{%s}[$__rate_interval]))
+              /
+            sum by(user) (rate(cortex_prometheus_rule_evaluation_duration_seconds_count{%s}[$__rate_interval]))
+          ||| % [$.jobMatcher($._config.job_names.ruler), $.jobMatcher($._config.job_names.ruler)],
           '{{ user }}'
-        )
+        ) +
+        { yaxes: $.yaxes('s') }
       )
     )
     .addRows(

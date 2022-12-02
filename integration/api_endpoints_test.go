@@ -9,14 +9,14 @@ package integration
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"testing"
 
+	"github.com/grafana/dskit/runutil"
 	"github.com/grafana/e2e"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/thanos/pkg/runutil"
 
 	"github.com/grafana/mimir/integration/e2emimir"
 )
@@ -74,7 +74,7 @@ func TestConfigAPIEndpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	defer runutil.ExhaustCloseWithErrCapture(&err, res.Body, "config API response")
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.StatusCode)
 

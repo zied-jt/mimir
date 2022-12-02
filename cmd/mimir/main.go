@@ -6,10 +6,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"os"
 	"runtime"
@@ -22,7 +23,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/weaveworks/common/tracing"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
 	"github.com/grafana/mimir/pkg/mimir"
 	util_log "github.com/grafana/mimir/pkg/util/log"
@@ -31,7 +32,7 @@ import (
 )
 
 // configHash exposes information about the loaded config
-var configHash *prometheus.GaugeVec = prometheus.NewGaugeVec(
+var configHash = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "cortex_config_hash",
 		Help: "Hash of the currently active config file.",
@@ -83,7 +84,7 @@ func main() {
 
 	// This sets default values from flags to the config.
 	// It needs to be called before parsing the config file!
-	flagext.RegisterFlagsWithLogger(util_log.Logger, &cfg)
+	cfg.RegisterFlags(flag.CommandLine, util_log.Logger)
 
 	if configFile != "" {
 		if err := LoadConfig(configFile, expandEnv, &cfg); err != nil {
@@ -128,6 +129,13 @@ func main() {
 	if mainFlags.printVersion {
 		fmt.Fprintln(os.Stdout, version.Print("Mimir"))
 		return
+	}
+
+	if err := mimir.InheritCommonFlagValues(util_log.Logger, flag.CommandLine, cfg.Common, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error inheriting common flag values: %v\n", err)
+		if !testMode {
+			os.Exit(1)
+		}
 	}
 
 	// Validate the config once both the config file has been loaded
@@ -177,7 +185,7 @@ func main() {
 	// Initialise seed for randomness usage.
 	rand.Seed(time.Now().UnixNano())
 
-	t, err := mimir.New(cfg)
+	t, err := mimir.New(cfg, prometheus.DefaultRegisterer)
 	util_log.CheckFatal("initializing application", err)
 
 	if mainFlags.printModules {
@@ -211,7 +219,7 @@ func main() {
 func parseConfigFileParameter(args []string) (configFile string, expandEnv bool) {
 	// ignore errors and any output here. Any flag errors will be reported by main flag.Parse() call.
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	fs.SetOutput(ioutil.Discard)
+	fs.SetOutput(io.Discard)
 
 	// usage not used in these functions.
 	fs.StringVar(&configFile, configFileOption, "", "")
@@ -230,7 +238,7 @@ func parseConfigFileParameter(args []string) (configFile string, expandEnv bool)
 
 // LoadConfig read YAML-formatted config from filename into cfg.
 func LoadConfig(filename string, expandEnv bool, cfg *mimir.Config) error {
-	buf, err := ioutil.ReadFile(filename)
+	buf, err := os.ReadFile(filename)
 	if err != nil {
 		return errors.Wrap(err, "Error reading config file")
 	}
@@ -245,8 +253,11 @@ func LoadConfig(filename string, expandEnv bool, cfg *mimir.Config) error {
 		buf = expandEnvironmentVariables(buf)
 	}
 
-	err = yaml.UnmarshalStrict(buf, cfg)
-	if err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(buf))
+	dec.KnownFields(true)
+
+	// Unmarshal with common config unmarshaler.
+	if err := dec.Decode((*mimir.ConfigWithCommon)(cfg)); err != nil {
 		return errors.Wrap(err, "Error parsing config file")
 	}
 

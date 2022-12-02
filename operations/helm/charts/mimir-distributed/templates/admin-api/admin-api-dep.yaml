@@ -7,6 +7,7 @@ metadata:
   labels:
     {{- include "mimir.labels" (dict "ctx" . "component" "admin-api" "memberlist" true) | nindent 4 }}
   name: {{ include "mimir.resourceName" (dict "ctx" . "component" "admin-api") }}
+  namespace: {{ .Release.Namespace | quote }}
 spec:
   replicas: {{ .Values.admin_api.replicas }}
   selector:
@@ -18,18 +19,9 @@ spec:
     metadata:
       labels:
         {{- include "mimir.podLabels" (dict "ctx" . "component" "admin-api" "memberlist" true) | nindent 8 }}
-        {{- with .Values.admin_api.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       annotations:
-        {{- if .Values.useExternalConfig }}
-        checksum/config: {{ .Values.externalConfigVersion }}
-        {{- else }}
-        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- end}}
-        {{- with .Values.admin_api.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "mimir.podAnnotations" (dict "ctx" . "component" "admin-api") | nindent 8 }}
+      namespace: {{ .Release.Namespace | quote }}
     spec:
       serviceAccountName: {{ template "mimir.serviceAccountName" . }}
       {{- if .Values.admin_api.priorityClassName }}
@@ -53,6 +45,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "-target=admin-api"
+            - "-config.expand-env=true"
             - "-config.file=/etc/mimir/mimir.yaml"
             {{- range $key, $value := .Values.admin_api.extraArgs }}
             - "-{{ $key }}={{ $value }}"
@@ -70,6 +63,8 @@ spec:
             - name: storage
               mountPath: "/data"
               subPath: {{ .Values.admin_api.persistence.subPath }}
+            - name: active-queries
+              mountPath: /active-query-tracker
           ports:
             - name: http-metrics
               containerPort: {{ include "mimir.serverHttpListenPort" . }}
@@ -87,10 +82,20 @@ spec:
           resources:
             {{- toYaml .Values.admin_api.resources | nindent 12 }}
           securityContext:
-            readOnlyRootFilesystem: true
+            {{- toYaml .Values.admin_api.containerSecurityContext | nindent 12 }}
           env:
-            {{- if .Values.admin_api.env }}
-            {{ toYaml .Values.admin_api.env | nindent 12 }}
+            {{- with .Values.global.extraEnv }}
+              {{ toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.admin_api.env }}
+              {{ toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- with .Values.global.extraEnvFrom }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.admin_api.extraEnvFrom }}
+              {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- with .Values.admin_api.extraContainers }}
         {{ toYaml . | nindent 8 }}
@@ -99,13 +104,14 @@ spec:
         {{- toYaml .Values.admin_api.nodeSelector | nindent 8 }}
       affinity:
         {{- toYaml .Values.admin_api.affinity | nindent 8 }}
+      topologySpreadConstraints:
+        {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" . "component" "admin-api") | nindent 8 }}
       tolerations:
         {{- toYaml .Values.admin_api.tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.admin_api.terminationGracePeriodSeconds }}
       volumes:
         - name: config
-          secret:
-            secretName: {{ tpl .Values.externalConfigSecretName . }}
+          {{- include "mimir.configVolume" . | nindent 10 }}
         - name: runtime-config
           configMap:
             name: {{ template "mimir.fullname" . }}-runtime
@@ -116,5 +122,7 @@ spec:
           secret:
             secretName: {{ tpl .Values.license.secretName . }}
         - name: storage
+          emptyDir: {}
+        - name: active-queries
           emptyDir: {}
 {{- end -}}

@@ -12,9 +12,9 @@ import (
 	"github.com/oklog/ulid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
 
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 )
 
 func TestLabelRemoverFilter(t *testing.T) {
@@ -27,17 +27,31 @@ func TestLabelRemoverFilter(t *testing.T) {
 		input    map[ulid.ULID]map[string]string
 		expected map[ulid.ULID]map[string]string
 	}{
-		"should remove cpnfigured labels": {
-			labels: []string{mimir_tsdb.IngesterIDExternalLabel},
+		"should remove configured labels": {
+			labels: []string{mimir_tsdb.DeprecatedIngesterIDExternalLabel},
 			input: map[ulid.ULID]map[string]string{
-				block1: {mimir_tsdb.IngesterIDExternalLabel: "ingester-0", mimir_tsdb.TenantIDExternalLabel: "user-1"},
-				block2: {mimir_tsdb.IngesterIDExternalLabel: "ingester-0", mimir_tsdb.TenantIDExternalLabel: "user-1"},
-				block3: {mimir_tsdb.IngesterIDExternalLabel: "ingester-0", mimir_tsdb.TenantIDExternalLabel: "user-1"},
+				block1: {mimir_tsdb.DeprecatedIngesterIDExternalLabel: "ingester-0", mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+				block2: {mimir_tsdb.DeprecatedIngesterIDExternalLabel: "ingester-0", mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+				block3: {mimir_tsdb.DeprecatedIngesterIDExternalLabel: "ingester-0", mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
 			},
 			expected: map[ulid.ULID]map[string]string{
-				block1: {mimir_tsdb.TenantIDExternalLabel: "user-1"},
-				block2: {mimir_tsdb.TenantIDExternalLabel: "user-1"},
-				block3: {mimir_tsdb.TenantIDExternalLabel: "user-1"},
+				block1: {mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+				block2: {mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+				block3: {mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+			},
+		},
+
+		"should remove configured labels 2": {
+			labels: []string{mimir_tsdb.DeprecatedIngesterIDExternalLabel, mimir_tsdb.DeprecatedTenantIDExternalLabel},
+			input: map[ulid.ULID]map[string]string{
+				block1: {mimir_tsdb.DeprecatedIngesterIDExternalLabel: "ingester-0", mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+				block2: {mimir_tsdb.DeprecatedIngesterIDExternalLabel: "ingester-0", mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+				block3: {mimir_tsdb.DeprecatedIngesterIDExternalLabel: "ingester-0", mimir_tsdb.DeprecatedTenantIDExternalLabel: "user-1"},
+			},
+			expected: map[ulid.ULID]map[string]string{
+				block1: {},
+				block2: {},
+				block3: {},
 			},
 		},
 	}

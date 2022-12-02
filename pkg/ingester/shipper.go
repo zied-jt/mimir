@@ -7,7 +7,7 @@ package ingester
 
 import (
 	"context"
-	"io/ioutil"
+	"encoding/json"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,15 +15,17 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/runutil"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/prometheus/model/labels"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/shipper"
+	"github.com/prometheus/prometheus/tsdb/fileutil"
+	"github.com/thanos-io/objstore"
+
+	"github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 )
 
 type metrics struct {
@@ -63,7 +65,6 @@ type Shipper struct {
 	dir     string
 	metrics *metrics
 	bucket  objstore.Bucket
-	labels  func() labels.Labels
 	source  metadata.SourceType
 
 	hashFunc metadata.HashFunc
@@ -77,22 +78,17 @@ func NewShipper(
 	r prometheus.Registerer,
 	dir string,
 	bucket objstore.Bucket,
-	lbls func() labels.Labels,
 	source metadata.SourceType,
 	hashFunc metadata.HashFunc,
 ) *Shipper {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
-	if lbls == nil {
-		lbls = func() labels.Labels { return nil }
-	}
 
 	return &Shipper{
 		logger:   logger,
 		dir:      dir,
 		bucket:   bucket,
-		labels:   lbls,
 		metrics:  newMetrics(r),
 		source:   source,
 		hashFunc: hashFunc,
@@ -102,11 +98,9 @@ func NewShipper(
 // Sync performs a single synchronization, which ensures all non-compacted local blocks have been uploaded
 // to the object bucket once.
 //
-// If uploaded.
-//
 // It is not concurrency-safe, however it is compactor-safe (running concurrently with compactor is ok).
 func (s *Shipper) Sync(ctx context.Context) (uploaded int, err error) {
-	meta, err := shipper.ReadMetaFile(s.dir)
+	meta, err := readShipperMetaFile(s.dir)
 	if err != nil {
 		// If we encounter any error, proceed with an empty meta file and overwrite it later.
 		// The meta file is only used to avoid unnecessary bucket.Exists call,
@@ -114,7 +108,7 @@ func (s *Shipper) Sync(ctx context.Context) (uploaded int, err error) {
 		if !os.IsNotExist(err) {
 			level.Warn(s.logger).Log("msg", "reading meta file failed, will override it", "err", err)
 		}
-		meta = &shipper.Meta{Version: shipper.MetaVersion1}
+		meta = &shipperMeta{Version: shipperMetaVersion1}
 	}
 
 	// Build a map of blocks we already uploaded.
@@ -123,7 +117,7 @@ func (s *Shipper) Sync(ctx context.Context) (uploaded int, err error) {
 		hasUploaded[id] = struct{}{}
 	}
 
-	// Reset the uploaded slice so we can rebuild it only with blocks that still exist locally.
+	// Reset the uploaded slice, so we can rebuild it only with blocks that still exist locally.
 	meta.Uploaded = nil
 
 	var uploadErrs int
@@ -158,6 +152,7 @@ func (s *Shipper) Sync(ctx context.Context) (uploaded int, err error) {
 		}
 		if ok {
 			meta.Uploaded = append(meta.Uploaded, m.ULID)
+			uploaded++ // the last upload must have failed, report the block as if it was uploaded successfully now
 			continue
 		}
 
@@ -172,7 +167,7 @@ func (s *Shipper) Sync(ctx context.Context) (uploaded int, err error) {
 		uploaded++
 		s.metrics.uploads.Inc()
 	}
-	if err := shipper.WriteMetaFile(s.logger, s.dir, meta); err != nil {
+	if err := writeShipperMetaFile(s.logger, s.dir, meta); err != nil {
 		level.Warn(s.logger).Log("msg", "updating meta file failed", "err", err)
 	}
 
@@ -185,48 +180,25 @@ func (s *Shipper) Sync(ctx context.Context) (uploaded int, err error) {
 	return uploaded, nil
 }
 
-// sync uploads the block if not exists in remote storage.
-// TODO(khyatisoneji): Double check if block does not have deletion-mark.json for some reason, otherwise log it or return error.
+// upload method uploads the block to blocks storage. Block is uploaded with updated meta.json file with extra details.
+// This updated version of meta.json is however not persisted locally on the disk, to avoid race condition when TSDB
+// library could actually unload the block if it found meta.json file missing.
 func (s *Shipper) upload(ctx context.Context, meta *metadata.Meta) error {
 	level.Info(s.logger).Log("msg", "upload new block", "id", meta.ULID)
 
-	// We hard-link the files into a temporary upload directory so we are not affected
-	// by other operations happening against the TSDB directory.
-	updir := filepath.Join(s.dir, "thanos", "upload", meta.ULID.String())
+	blockDir := filepath.Join(s.dir, meta.ULID.String())
 
-	// Remove updir just in case.
-	if err := os.RemoveAll(updir); err != nil {
-		return errors.Wrap(err, "clean upload directory")
-	}
-	if err := os.MkdirAll(updir, 0750); err != nil {
-		return errors.Wrap(err, "create upload dir")
-	}
-	defer func() {
-		if err := os.RemoveAll(updir); err != nil {
-			level.Error(s.logger).Log("msg", "failed to clean upload directory", "err", err)
-		}
-	}()
-
-	dir := filepath.Join(s.dir, meta.ULID.String())
-	if err := hardlinkBlock(dir, updir); err != nil {
-		return errors.Wrap(err, "hard link block")
-	}
-	// Attach current labels and write a new meta file with Thanos extensions.
-	if lset := s.labels(); lset != nil {
-		meta.Thanos.Labels = lset.Map()
-	}
 	meta.Thanos.Source = s.source
-	meta.Thanos.SegmentFiles = block.GetSegmentFiles(updir)
-	if err := meta.WriteToDir(s.logger, updir); err != nil {
-		return errors.Wrap(err, "write meta file")
-	}
-	return block.Upload(ctx, s.logger, s.bucket, updir, s.hashFunc)
+	meta.Thanos.SegmentFiles = block.GetSegmentFiles(blockDir)
+
+	// Upload block with custom metadata.
+	return tsdb.UploadBlock(ctx, s.logger, s.bucket, blockDir, meta)
 }
 
 // blockMetasFromOldest returns the block meta of each block found in dir
 // sorted by minTime asc.
 func (s *Shipper) blockMetasFromOldest() (metas []*metadata.Meta, _ error) {
-	fis, err := ioutil.ReadDir(s.dir)
+	fis, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, errors.Wrap(err, "read dir")
 	}
@@ -259,48 +231,98 @@ func (s *Shipper) blockMetasFromOldest() (metas []*metadata.Meta, _ error) {
 	return metas, nil
 }
 
-func hardlinkBlock(src, dst string) error {
-	chunkDir := filepath.Join(dst, block.ChunksDirname)
-
-	if err := os.MkdirAll(chunkDir, 0750); err != nil {
-		return errors.Wrap(err, "create chunks dir")
-	}
-
-	fis, err := ioutil.ReadDir(filepath.Join(src, block.ChunksDirname))
-	if err != nil {
-		return errors.Wrap(err, "read chunk dir")
-	}
-	files := make([]string, 0, len(fis))
-	for _, fi := range fis {
-		files = append(files, fi.Name())
-	}
-	for i, fn := range files {
-		files[i] = filepath.Join(block.ChunksDirname, fn)
-	}
-	files = append(files, block.MetaFilename, block.IndexFilename)
-
-	for _, fn := range files {
-		if err := os.Link(filepath.Join(src, fn), filepath.Join(dst, fn)); err != nil {
-			return errors.Wrapf(err, "hard link file %s", fn)
-		}
-	}
-	return nil
-}
-
 func readShippedBlocks(dir string) (map[ulid.ULID]struct{}, error) {
-	shipperMeta, err := shipper.ReadMetaFile(dir)
+	meta, err := readShipperMetaFile(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		// If the meta file doesn't exist it means the shipper hasn't run yet.
-		shipperMeta = &shipper.Meta{}
+		meta = &shipperMeta{}
 	} else if err != nil {
 		return nil, err
 	}
 
 	// Build a map.
-	shippedBlocks := make(map[ulid.ULID]struct{}, len(shipperMeta.Uploaded))
-	for _, blockID := range shipperMeta.Uploaded {
+	shippedBlocks := make(map[ulid.ULID]struct{}, len(meta.Uploaded))
+	for _, blockID := range meta.Uploaded {
 		shippedBlocks[blockID] = struct{}{}
 	}
 
 	return shippedBlocks, nil
+}
+
+// shipperMeta defines the format thanos.shipper.json file that the shipper places in the data directory.
+type shipperMeta struct {
+	Version  int         `json:"version"`
+	Uploaded []ulid.ULID `json:"uploaded"`
+}
+
+const (
+	// shipperMetaFilename is the known JSON filename for meta information.
+	shipperMetaFilename = "thanos.shipper.json"
+
+	// shipperMetaVersion1 represents 1 version of meta.
+	shipperMetaVersion1 = 1
+)
+
+// writeShipperMetaFile writes the given meta into <dir>/thanos.shipper.json.
+func writeShipperMetaFile(logger log.Logger, dir string, meta *shipperMeta) error {
+	// Make any changes to the file appear atomic.
+	path := filepath.Join(dir, shipperMetaFilename)
+	tmp := path + ".tmp"
+
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "\t")
+
+	if err := enc.Encode(meta); err != nil {
+		runutil.CloseWithLogOnErr(logger, f, "write meta file close")
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return renameFile(logger, tmp, path)
+}
+
+// readShipperMetaFile reads the given meta from <dir>/thanos.shipper.json.
+func readShipperMetaFile(dir string) (*shipperMeta, error) {
+	fpath := filepath.Join(dir, filepath.Clean(shipperMetaFilename))
+	b, err := os.ReadFile(fpath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read %s", fpath)
+	}
+
+	var m shipperMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, errors.Wrapf(err, "failed to parse %s as JSON: %q", fpath, string(b))
+	}
+	if m.Version != shipperMetaVersion1 {
+		return nil, errors.Errorf("unexpected meta file version %d", m.Version)
+	}
+
+	return &m, nil
+}
+
+func renameFile(logger log.Logger, from, to string) error {
+	if err := os.RemoveAll(to); err != nil {
+		return err
+	}
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+
+	// Directory was renamed; sync parent dir to persist rename.
+	pdir, err := fileutil.OpenDir(filepath.Dir(to))
+	if err != nil {
+		return err
+	}
+
+	if err = fileutil.Fdatasync(pdir); err != nil {
+		runutil.CloseWithLogOnErr(logger, pdir, "rename file dir close")
+		return err
+	}
+	return pdir.Close()
 }

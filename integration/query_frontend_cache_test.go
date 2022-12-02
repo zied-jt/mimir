@@ -27,7 +27,10 @@ func TestQueryFrontendUnalignedQuery(t *testing.T) {
 	require.NoError(t, s.StartAndWaitReady(consul, memcached))
 
 	const configFile = ""
-	flags := BlocksStorageFlags()
+	flags := mergeFlags(
+		BlocksStorageFlags(),
+		BlocksStorageS3Flags(),
+	)
 
 	minio := e2edb.NewMinio(9000, flags["-blocks-storage.s3.bucket-name"])
 	require.NoError(t, s.StartAndWaitReady(minio))
@@ -35,17 +38,17 @@ func TestQueryFrontendUnalignedQuery(t *testing.T) {
 	flags = mergeFlags(flags, map[string]string{
 		"-query-frontend.cache-results":                     "true",
 		"-query-frontend.split-queries-by-interval":         "2m",
-		"-query-frontend.align-querier-with-step":           "true",
+		"-query-frontend.align-queries-with-step":           "true",
 		"-query-frontend.max-cache-freshness":               "0", // Cache everything.
 		"-query-frontend.results-cache.backend":             "memcached",
 		"-query-frontend.results-cache.memcached.addresses": "dns+" + memcached.NetworkEndpoint(e2ecache.MemcachedPort),
 	})
 
 	// Start the query-frontend.
-	queryFrontendAligned := e2emimir.NewQueryFrontend("query-frontend-aligned", mergeFlags(flags, map[string]string{"-query-frontend.align-querier-with-step": "true"}), e2emimir.WithConfigFile(configFile))
+	queryFrontendAligned := e2emimir.NewQueryFrontend("query-frontend-aligned", mergeFlags(flags, map[string]string{"-query-frontend.align-queries-with-step": "true"}), e2emimir.WithConfigFile(configFile))
 	require.NoError(t, s.Start(queryFrontendAligned))
 
-	queryFrontendUnaligned := e2emimir.NewQueryFrontend("query-frontend-unaligned", mergeFlags(flags, map[string]string{"-query-frontend.align-querier-with-step": "false"}), e2emimir.WithConfigFile(configFile))
+	queryFrontendUnaligned := e2emimir.NewQueryFrontend("query-frontend-unaligned", mergeFlags(flags, map[string]string{"-query-frontend.align-queries-with-step": "false"}), e2emimir.WithConfigFile(configFile))
 	require.NoError(t, s.Start(queryFrontendUnaligned))
 
 	querierAligned := e2emimir.NewQuerier("querier-aligned", consul.NetworkHTTPEndpoint(), mergeFlags(flags, map[string]string{"-querier.frontend-address": queryFrontendAligned.NetworkGRPCEndpoint()}), e2emimir.WithConfigFile(configFile))
@@ -84,7 +87,7 @@ func TestQueryFrontendUnalignedQuery(t *testing.T) {
 
 	sampleTime := now.Add(-3 * time.Minute)
 
-	series, expectedVector := generateSeries("series_1", sampleTime)
+	series, expectedVector, _ := generateSeries("series_1", sampleTime)
 	val := expectedVector[0].Value
 
 	res, err := c.Push(series)

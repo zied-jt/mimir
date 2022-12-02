@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/grafana/dskit/ring"
+	"github.com/grafana/dskit/tenant"
 	"github.com/opentracing/opentracing-go"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/weaveworks/common/instrument"
-
-	"github.com/grafana/dskit/tenant"
 
 	ingester_client "github.com/grafana/mimir/pkg/ingester/client"
 	"github.com/grafana/mimir/pkg/mimirpb"
@@ -34,8 +34,8 @@ func (d *Distributor) QueryExemplars(ctx context.Context, from, to model.Time, m
 			return err
 		}
 
-		// We ask for all ingesters without passing matchers because exemplar queries take in an array of array of label matchers.
-		replicationSet, err := d.GetIngestersForQuery(ctx, nil)
+		// We ask for all ingesters without passing matchers because exemplar queries take in an array of label matchers.
+		replicationSet, err := d.GetIngesters(ctx)
 		if err != nil {
 			return err
 		}
@@ -62,7 +62,7 @@ func (d *Distributor) QueryStream(ctx context.Context, from, to model.Time, matc
 			return err
 		}
 
-		replicationSet, err := d.GetIngestersForQuery(ctx, matchers...)
+		replicationSet, err := d.GetIngesters(ctx)
 		if err != nil {
 			return err
 		}
@@ -80,29 +80,8 @@ func (d *Distributor) QueryStream(ctx context.Context, from, to model.Time, matc
 	return result, err
 }
 
-// GetIngestersForQuery returns a replication set including all ingesters that should be queried
-// to fetch series matching input label matchers.
-func (d *Distributor) GetIngestersForQuery(ctx context.Context, matchers ...*labels.Matcher) (ring.ReplicationSet, error) {
-	userID, err := tenant.TenantID(ctx)
-	if err != nil {
-		return ring.ReplicationSet{}, err
-	}
-
-	// If tenant uses shuffle sharding, we should only query ingesters which are
-	// part of the tenant's subring.
-	shardSize := d.limits.IngestionTenantShardSize(userID)
-	lookbackPeriod := d.cfg.ShuffleShardingLookbackPeriod
-
-	if shardSize > 0 && lookbackPeriod > 0 {
-		return d.ingestersRing.ShuffleShardWithLookback(userID, shardSize, lookbackPeriod, time.Now()).GetReplicationSetForOperation(ring.Read)
-	}
-
-	return d.ingestersRing.GetReplicationSetForOperation(ring.Read)
-}
-
-// GetIngestersForMetadata returns a replication set including all ingesters that should be queried
-// to fetch metadata (eg. label names/values or series).
-func (d *Distributor) GetIngestersForMetadata(ctx context.Context) (ring.ReplicationSet, error) {
+// GetIngesters returns a replication set including all ingesters.
+func (d *Distributor) GetIngesters(ctx context.Context) (ring.ReplicationSet, error) {
 	userID, err := tenant.TenantID(ctx)
 	if err != nil {
 		return ring.ReplicationSet{}, err
@@ -216,7 +195,19 @@ func (d *Distributor) queryIngesterStream(ctx context.Context, replicationSet ri
 	// Start reading and accumulating responses. stopReading chan will
 	// be closed when all calls to ingesters have finished.
 	go func() {
-		defer close(doneReading)
+		// We keep track of the number of chunks that were able to be deduplicated entirely
+		// via the accumulateChunks function (fast) instead of needing to merge samples one
+		// by one (slow). Useful to verify the performance impact of things that potentially
+		// result in different samples being written to each ingester.
+		var numDeduplicatedChunks int
+		var numTotalChunks int
+
+		defer func() {
+			close(doneReading)
+			d.ingesterChunksDeduplicated.Add(float64(numDeduplicatedChunks))
+			d.ingesterChunksTotal.Add(float64(numTotalChunks))
+		}()
+
 		for {
 			select {
 			case <-stop:
@@ -227,7 +218,12 @@ func (d *Distributor) queryIngesterStream(ctx context.Context, replicationSet ri
 					key := ingester_client.LabelsToKeyString(mimirpb.FromLabelAdaptersToLabels(series.Labels))
 					existing := hashToChunkseries[key]
 					existing.Labels = series.Labels
+
+					numPotentialChunks := len(existing.Chunks) + len(series.Chunks)
 					existing.Chunks = accumulateChunks(existing.Chunks, series.Chunks)
+
+					numDeduplicatedChunks += numPotentialChunks - len(existing.Chunks)
+					numTotalChunks += len(series.Chunks)
 					hashToChunkseries[key] = existing
 				}
 
@@ -262,7 +258,7 @@ func (d *Distributor) queryIngesterStream(ctx context.Context, replicationSet ri
 
 		for {
 			resp, err := stream.Recv()
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			} else if err != nil {
 				return nil, err

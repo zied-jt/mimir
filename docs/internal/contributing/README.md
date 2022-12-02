@@ -14,6 +14,10 @@ a piece of work is finished it should:
 - Include a [CHANGELOG](#changelog) message if users of Grafana Mimir need to hear about what you did.
 - If you have made any changes to flags or config, run `make doc` and commit the changed files to update the config file documentation.
 
+## Grafana Mimir Helm chart
+
+Please see the dedicated "[Contributing to Grafana Mimir helm chart](contributing-to-helm-chart.md)" page.
+
 ## Formatting
 
 Grafana Mimir uses `goimports` tool (`go get golang.org/x/tools/cmd/goimports` to install) to format the Go files, and sort imports. We use goimports with `-local github.com/grafana/mimir` parameter, to put Grafana Mimir internal imports into a separate group. We try to keep imports sorted into three groups: imports from standard library, imports of 3rd party packages and internal Grafana Mimir imports. Goimports will fix the order, but will keep existing newlines between imports in the groups. We try to avoid extra newlines like that.
@@ -30,9 +34,11 @@ To build:
 make
 ```
 
+You can use `make help` to see the available targets.
 (By default, the build runs in a Docker container, using an image built
 with all the tools required. The source code is mounted from where you
-run `make` into the build container as a Docker volume.)
+run `make` into the build container as a Docker volume.
+The mount options can be adjusted with `CONTAINER_MOUNT_OPTIONS`.)
 
 To run the unit tests suite:
 
@@ -41,6 +47,17 @@ go test ./...
 ```
 
 To run the integration tests suite please see "[How integration tests work](./how-integration-tests-work.md)".
+
+If using macOS, make sure you have `gnu-sed` installed; otherwise, some make targets will not work properly.
+
+Depending on how Docker is installed and configured and also the hardening applied to your workstation, using the Docker mount options might not work properly.
+This is also true if you are using an alternative to Docker like Podman. In such case, you can use `CONTAINER_MOUNT_OPTIONS` to adjust the mount option.
+
+Example:
+
+```
+make CONTAINER_MOUNT_OPTIONS=delegated
+```
 
 ### Dependency management
 
@@ -74,9 +91,19 @@ Please see the dedicated "[Design patterns and Code conventions](design-patterns
 
 ## Documentation
 
-The Grafana Mimir documentation is compiled into a website published at [grafana.com](https://grafana.com/). Please see "[How to run the website locally](./how-to-run-website-locally.md)" for instructions.
+The Grafana Mimir documentation is compiled into a website published at [grafana.com](https://grafana.com/). Run `make docs` to build and serve the documentation locally.
 
-Note: if you attempt to view pages on Github, it's likely that you might find broken links or pages. That is expected and should not be addressed unless it is causing issues with the site that occur as part of the build.
+Note: if you attempt to view pages on GitHub, it's likely that you might find broken links or pages. That is expected and should not be addressed unless it is causing issues with the site that occur as part of the build.
+
+## Errors catalog
+
+We document the common user-visible errors so it is easy for the user to search for how to address those errors when they see them.
+
+To add a new error:
+
+- Under `pkg/util/globalerror/errors.go`, create a new unique ID string as a constant. After your changes make it into a public release, do not change this string.
+- When returning the error, use one of the functions in `globalerror` to generate the message. If you return the same error from multiple places, create a new function to return that error so that its message string is defined in only one place. Then, add a simple test for that function to compare its actual output with the expected message which is defined as a hard-coded string.
+- Update the runbook in `docs/sources/mimir/operators-guide/mimir-runbooks/_index.md` with details about why the error happens, and if possible how to address it.
 
 ## Changelog
 
@@ -94,7 +121,7 @@ The FEATURE scope denotes a change that adds new functionality to the project/se
 
 #### [ENHANCEMENT]
 
-The ENHANCEMENT scope denotes a change that improves upon the current functionality of the project/service. Generally, an enhancement is something that improves upon something that is already present. Either by making it simpler, more powerful, or more performant. For Example:
+The ENHANCEMENT scope denotes a change that improves upon the current functionality of the project/service. Generally, an enhancement is something that improves upon something that is already present. Either by making it simpler, more powerful, or more performant. For example:
 
 - An optimization on a particular process in a service that makes it more performant
 - Simpler syntax for setting a configuration value, like allowing `1m` instead of 60 for a duration setting.

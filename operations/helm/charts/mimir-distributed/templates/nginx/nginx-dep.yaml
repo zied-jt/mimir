@@ -8,6 +8,7 @@ metadata:
     {{- include "mimir.labels" (dict "ctx" . "component" "nginx") | nindent 4 }}
   annotations:
     {{- toYaml .Values.nginx.annotations | nindent 4 }}
+  namespace: {{ .Release.Namespace | quote }}
 spec:
 {{- if not .Values.nginx.autoscaling.enabled }}
   replicas: {{ .Values.nginx.replicas }}
@@ -23,19 +24,22 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print .Template.BasePath "/nginx/nginx-configmap.yaml") . | sha256sum }}
+        {{- with .Values.global.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- with .Values.nginx.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
         {{- include "mimir.podLabels" (dict "ctx" . "component" "nginx") | nindent 8 }}
-        {{- with .Values.nginx.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+      namespace: {{ .Release.Namespace | quote }}
     spec:
       serviceAccountName: {{ include "mimir.serviceAccountName" . }}
-      {{- with .Values.imagePullSecrets }}
+      {{- if .Values.image.pullSecrets }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      {{- range .Values.image.pullSecrets }}
+        - name: {{ . }}
+      {{- end }}
       {{- end }}
       {{- if .Values.nginx.priorityClassName }}
       priorityClassName: {{ .Values.nginx.priorityClassName }}
@@ -47,16 +51,28 @@ spec:
         - name: nginx
           image: {{ .Values.nginx.image.registry }}/{{ .Values.nginx.image.repository }}:{{ .Values.nginx.image.tag }}
           imagePullPolicy: {{ .Values.nginx.image.pullPolicy }}
+          {{- with .Values.nginx.extraArgs }}
+          args:
+            {{- range $key, $value := . }}
+            - "-{{ $key }} {{ $value }}"
+            {{- end }}
+          {{- end }}
           ports:
             - name: http-metric
               containerPort: 8080
               protocol: TCP
-          {{- with .Values.nginx.extraEnv }}
           env:
+          {{- with .Values.global.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nginx.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+          {{- with .Values.global.extraEnvFrom }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.nginx.extraEnvFrom }}
-          envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           readinessProbe:
@@ -79,10 +95,15 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.nginx.resources | nindent 12 }}
+        {{- if .Values.nginx.extraContainers }}
+        {{- toYaml .Values.nginx.extraContainers | nindent 8}}
+        {{- end }}
       {{- with .Values.nginx.affinity }}
       affinity:
         {{- tpl . $ | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" . "component" "nginx") | nindent 8 }}
       {{- with .Values.nginx.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

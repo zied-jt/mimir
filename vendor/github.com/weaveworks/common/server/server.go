@@ -16,7 +16,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	node_https "github.com/prometheus/node_exporter/https"
+	"github.com/prometheus/exporter-toolkit/web"
 	"golang.org/x/net/context"
 	"golang.org/x/net/netutil"
 	"google.golang.org/grpc"
@@ -50,6 +50,14 @@ type SignalHandler interface {
 	Stop()
 }
 
+// TLSConfig contains TLS parameters for Config.
+type TLSConfig struct {
+	TLSCertPath string `yaml:"cert_file"`
+	TLSKeyPath  string `yaml:"key_file"`
+	ClientAuth  string `yaml:"client_auth_type"`
+	ClientCAs   string `yaml:"client_ca_file"`
+}
+
 // Config for a Server
 type Config struct {
 	MetricsNamespace  string `yaml:"-"`
@@ -62,11 +70,14 @@ type Config struct {
 	GRPCListenPort    int    `yaml:"grpc_listen_port"`
 	GRPCConnLimit     int    `yaml:"grpc_listen_conn_limit"`
 
-	HTTPTLSConfig node_https.TLSStruct `yaml:"http_tls_config"`
-	GRPCTLSConfig node_https.TLSStruct `yaml:"grpc_tls_config"`
+	CipherSuites  string    `yaml:"tls_cipher_suites"`
+	MinVersion    string    `yaml:"tls_min_version"`
+	HTTPTLSConfig TLSConfig `yaml:"http_tls_config"`
+	GRPCTLSConfig TLSConfig `yaml:"grpc_tls_config"`
 
-	RegisterInstrumentation bool `yaml:"register_instrumentation"`
-	ExcludeRequestInLog     bool `yaml:"-"`
+	RegisterInstrumentation  bool `yaml:"register_instrumentation"`
+	ExcludeRequestInLog      bool `yaml:"-"`
+	DisableRequestSuccessLog bool `yaml:"-"`
 
 	ServerGracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout"`
 	HTTPServerReadTimeout         time.Duration `yaml:"http_server_read_timeout"`
@@ -91,12 +102,13 @@ type Config struct {
 	GRPCServerMinTimeBetweenPings      time.Duration `yaml:"grpc_server_min_time_between_pings"`
 	GRPCServerPingWithoutStreamAllowed bool          `yaml:"grpc_server_ping_without_stream_allowed"`
 
-	LogFormat          logging.Format    `yaml:"log_format"`
-	LogLevel           logging.Level     `yaml:"log_level"`
-	Log                logging.Interface `yaml:"-"`
-	LogSourceIPs       bool              `yaml:"log_source_ips_enabled"`
-	LogSourceIPsHeader string            `yaml:"log_source_ips_header"`
-	LogSourceIPsRegex  string            `yaml:"log_source_ips_regex"`
+	LogFormat             logging.Format    `yaml:"log_format"`
+	LogLevel              logging.Level     `yaml:"log_level"`
+	Log                   logging.Interface `yaml:"-"`
+	LogSourceIPs          bool              `yaml:"log_source_ips_enabled"`
+	LogSourceIPsHeader    string            `yaml:"log_source_ips_header"`
+	LogSourceIPsRegex     string            `yaml:"log_source_ips_regex"`
+	LogRequestAtInfoLevel bool              `yaml:"log_request_at_info_level_enabled"`
 
 	// If not set, default signal handler is used.
 	SignalHandler SignalHandler `yaml:"-"`
@@ -114,6 +126,8 @@ var infinty = time.Duration(math.MaxInt64)
 func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.StringVar(&cfg.HTTPListenAddress, "server.http-listen-address", "", "HTTP server listen address.")
 	f.StringVar(&cfg.HTTPListenNetwork, "server.http-listen-network", DefaultNetwork, "HTTP server listen network, default tcp")
+	f.StringVar(&cfg.CipherSuites, "server.tls-cipher-suites", "", "Comma-separated list of cipher suites to use. If blank, the default Go cipher suites is used.")
+	f.StringVar(&cfg.MinVersion, "server.tls-min-version", "", "Minimum TLS version to use. Allowed values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13. If blank, the Go TLS minimum version is used.")
 	f.StringVar(&cfg.HTTPTLSConfig.TLSCertPath, "server.http-tls-cert-path", "", "HTTP server cert path.")
 	f.StringVar(&cfg.HTTPTLSConfig.TLSKeyPath, "server.http-tls-key-path", "", "HTTP server key path.")
 	f.StringVar(&cfg.HTTPTLSConfig.ClientAuth, "server.http-tls-client-auth", "", "HTTP TLS Client Auth type.")
@@ -149,6 +163,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.BoolVar(&cfg.LogSourceIPs, "server.log-source-ips-enabled", false, "Optionally log the source IPs.")
 	f.StringVar(&cfg.LogSourceIPsHeader, "server.log-source-ips-header", "", "Header field storing the source IPs. Only used if server.log-source-ips-enabled is true. If not set the default Forwarded, X-Real-IP and X-Forwarded-For headers are used")
 	f.StringVar(&cfg.LogSourceIPsRegex, "server.log-source-ips-regex", "", "Regex for matching the source IPs. Only used if server.log-source-ips-enabled is true. If not set the default Forwarded, X-Real-IP and X-Forwarded-For headers are used")
+	f.BoolVar(&cfg.LogRequestAtInfoLevel, "server.log-request-at-info-level-enabled", false, "Optionally log requests at info level instead of debug level.")
 }
 
 // Server wraps a HTTP and gRPC server, and some common initialization.
@@ -170,19 +185,36 @@ type Server struct {
 
 // New makes a new Server
 func New(cfg Config) (*Server, error) {
+	// If user doesn't supply a logging implementation, by default instantiate
+	// logrus.
+	log := cfg.Log
+	if log == nil {
+		log = logging.NewLogrus(cfg.LogLevel)
+	}
+
+	// If user doesn't supply a registerer/gatherer, use Prometheus' by default.
+	reg := cfg.Registerer
+	if reg == nil {
+		reg = prometheus.DefaultRegisterer
+	}
+	gatherer := cfg.Gatherer
+	if gatherer == nil {
+		gatherer = prometheus.DefaultGatherer
+	}
+
 	tcpConnections := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: cfg.MetricsNamespace,
 		Name:      "tcp_connections",
 		Help:      "Current number of accepted TCP connections.",
 	}, []string{"protocol"})
-	prometheus.MustRegister(tcpConnections)
+	reg.MustRegister(tcpConnections)
 
 	tcpConnectionsLimit := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: cfg.MetricsNamespace,
 		Name:      "tcp_connections_limit",
 		Help:      "The max number of TCP connections that can be accepted (0 means no limit).",
 	}, []string{"protocol"})
-	prometheus.MustRegister(tcpConnectionsLimit)
+	reg.MustRegister(tcpConnectionsLimit)
 
 	network := cfg.HTTPListenNetwork
 	if network == "" {
@@ -215,36 +247,42 @@ func New(cfg Config) (*Server, error) {
 		grpcListener = netutil.LimitListener(grpcListener, cfg.GRPCConnLimit)
 	}
 
-	// If user doesn't supply a logging implementation, by default instantiate
-	// logrus.
-	log := cfg.Log
-	if log == nil {
-		log = logging.NewLogrus(cfg.LogLevel)
+	cipherSuites, err := stringToCipherSuites(cfg.CipherSuites)
+	if err != nil {
+		return nil, err
 	}
-
-	// If user doesn't supply a registerer/gatherer, use Prometheus' by default.
-	reg := cfg.Registerer
-	if reg == nil {
-		reg = prometheus.DefaultRegisterer
-	}
-	gatherer := cfg.Gatherer
-	if gatherer == nil {
-		gatherer = prometheus.DefaultGatherer
+	minVersion, err := stringToTLSVersion(cfg.MinVersion)
+	if err != nil {
+		return nil, err
 	}
 
 	// Setup TLS
 	var httpTLSConfig *tls.Config
 	if len(cfg.HTTPTLSConfig.TLSCertPath) > 0 && len(cfg.HTTPTLSConfig.TLSKeyPath) > 0 {
-		// Note: ConfigToTLSConfig from prometheus/node_exporter is awaiting security review.
-		httpTLSConfig, err = node_https.ConfigToTLSConfig(&cfg.HTTPTLSConfig)
+		// Note: ConfigToTLSConfig from prometheus/exporter-toolkit is awaiting security review.
+		httpTLSConfig, err = web.ConfigToTLSConfig(&web.TLSStruct{
+			TLSCertPath:  cfg.HTTPTLSConfig.TLSCertPath,
+			TLSKeyPath:   cfg.HTTPTLSConfig.TLSKeyPath,
+			ClientAuth:   cfg.HTTPTLSConfig.ClientAuth,
+			ClientCAs:    cfg.HTTPTLSConfig.ClientCAs,
+			CipherSuites: cipherSuites,
+			MinVersion:   minVersion,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("error generating http tls config: %v", err)
 		}
 	}
 	var grpcTLSConfig *tls.Config
 	if len(cfg.GRPCTLSConfig.TLSCertPath) > 0 && len(cfg.GRPCTLSConfig.TLSKeyPath) > 0 {
-		// Note: ConfigToTLSConfig from prometheus/node_exporter is awaiting security review.
-		grpcTLSConfig, err = node_https.ConfigToTLSConfig(&cfg.GRPCTLSConfig)
+		// Note: ConfigToTLSConfig from prometheus/exporter-toolkit is awaiting security review.
+		grpcTLSConfig, err = web.ConfigToTLSConfig(&web.TLSStruct{
+			TLSCertPath:  cfg.GRPCTLSConfig.TLSCertPath,
+			TLSKeyPath:   cfg.GRPCTLSConfig.TLSKeyPath,
+			ClientAuth:   cfg.GRPCTLSConfig.ClientAuth,
+			ClientCAs:    cfg.GRPCTLSConfig.ClientCAs,
+			CipherSuites: cipherSuites,
+			MinVersion:   minVersion,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("error generating grpc tls config: %v", err)
 		}
@@ -286,8 +324,9 @@ func New(cfg Config) (*Server, error) {
 
 	// Setup gRPC server
 	serverLog := middleware.GRPCServerLog{
-		WithRequest: !cfg.ExcludeRequestInLog,
-		Log:         log,
+		Log:                      log,
+		WithRequest:              !cfg.ExcludeRequestInLog,
+		DisableRequestSuccessLog: cfg.DisableRequestSuccessLog,
 	}
 	grpcMiddleware := []grpc.UnaryServerInterceptor{
 		serverLog.UnaryServerInterceptor,
@@ -367,8 +406,9 @@ func New(cfg Config) (*Server, error) {
 			SourceIPs:    sourceIPs,
 		},
 		middleware.Log{
-			Log:       log,
-			SourceIPs: sourceIPs,
+			Log:                   log,
+			SourceIPs:             sourceIPs,
+			LogRequestAtInfoLevel: cfg.LogRequestAtInfoLevel,
 		},
 		middleware.Instrument{
 			RouteMatcher:     router,
@@ -475,6 +515,17 @@ func (s *Server) Run() error {
 	}()
 
 	return <-errChan
+}
+
+// HTTPListenAddr exposes `net.Addr` that `Server` is listening to for HTTP connections.
+func (s *Server) HTTPListenAddr() net.Addr {
+	return s.httpListener.Addr()
+
+}
+
+// GRPCListenAddr exposes `net.Addr` that `Server` is listening to for GRPC connections.
+func (s *Server) GRPCListenAddr() net.Addr {
+	return s.grpcListener.Addr()
 }
 
 // Stop unblocks Run().

@@ -10,14 +10,14 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
 	"time"
 
 	"github.com/stretchr/testify/mock"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 )
 
-var errObjectDoesNotExist = errors.New("object does not exist")
+// ErrObjectDoesNotExist is used in tests to simulate objstore.Bucket.IsObjNotFoundErr().
+var ErrObjectDoesNotExist = errors.New("object does not exist")
 
 // ClientMock mocks objstore.Bucket
 type ClientMock struct {
@@ -103,12 +103,12 @@ func (m *ClientMock) MockGet(name, content string, err error) {
 		// each time the mocked Get() is called we do create a new one, so
 		// that getting the same mocked object twice works as expected.
 		m.On("Get", mock.Anything, name).Return(func(_ context.Context, _ string) (io.ReadCloser, error) {
-			return ioutil.NopCloser(bytes.NewReader([]byte(content))), err
+			return io.NopCloser(bytes.NewReader([]byte(content))), err
 		})
 	} else {
 		m.On("Exists", mock.Anything, name).Return(false, err)
-		m.On("Get", mock.Anything, name).Return(nil, errObjectDoesNotExist)
-		m.On("Attributes", mock.Anything, name).Return(nil, errObjectDoesNotExist)
+		m.On("Get", mock.Anything, name).Return(nil, ErrObjectDoesNotExist)
+		m.On("Attributes", mock.Anything, name).Return(nil, ErrObjectDoesNotExist)
 	}
 }
 
@@ -134,7 +134,7 @@ func (m *ClientMock) Exists(ctx context.Context, name string) (bool, error) {
 
 // IsObjNotFoundErr mocks objstore.Bucket.IsObjNotFoundErr()
 func (m *ClientMock) IsObjNotFoundErr(err error) bool {
-	return err == errObjectDoesNotExist
+	return errors.Is(err, ErrObjectDoesNotExist)
 }
 
 // ObjectSize mocks objstore.Bucket.Attributes()

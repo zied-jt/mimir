@@ -13,10 +13,10 @@ import (
 
 	"github.com/oklog/ulid"
 	"github.com/prometheus/prometheus/tsdb"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
 
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 	"github.com/grafana/mimir/pkg/util"
 )
 
@@ -107,7 +107,7 @@ func (m *Block) GetUploadedAt() time.Time {
 // ThanosMeta returns a block meta based on the known information in the index.
 // The returned meta doesn't include all original meta.json data but only a subset
 // of it.
-func (m *Block) ThanosMeta(userID string) *metadata.Meta {
+func (m *Block) ThanosMeta() *metadata.Meta {
 	return &metadata.Meta{
 		BlockMeta: tsdb.BlockMeta{
 			ULID:    m.ID,
@@ -116,10 +116,7 @@ func (m *Block) ThanosMeta(userID string) *metadata.Meta {
 			Version: metadata.TSDBVersion1,
 		},
 		Thanos: metadata.Thanos{
-			Version: metadata.ThanosVersion1,
-			Labels: map[string]string{
-				mimir_tsdb.TenantIDExternalLabel: userID,
-			},
+			Version:      metadata.ThanosVersion1,
 			SegmentFiles: m.thanosMetaSegmentFiles(),
 		},
 	}

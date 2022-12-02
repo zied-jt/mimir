@@ -8,41 +8,47 @@ local filename = 'mimir-compactor-resources.json';
     .addRow(
       $.row('CPU and memory')
       .addPanel(
-        $.containerCPUUsagePanel('CPU', 'compactor'),
+        $.containerCPUUsagePanelByComponent('compactor'),
       )
       .addPanel(
-        $.containerMemoryWorkingSetPanel('Memory (workingset)', 'compactor'),
+        $.containerGoHeapInUsePanelByComponent('compactor'),
+      )
+    )
+    .addRow(
+      $.row('')
+      .addPanel(
+        $.containerMemoryRSSPanelByComponent('compactor'),
       )
       .addPanel(
-        $.goHeapInUsePanel('Memory (go heap inuse)', $._config.job_names.compactor),
+        $.containerMemoryWorkingSetPanelByComponent('compactor'),
       )
     )
     .addRow(
       $.row('Network')
       .addPanel(
-        $.containerNetworkReceiveBytesPanel($._config.instance_names.compactor),
+        $.containerNetworkReceiveBytesPanelByComponent('compactor'),
       )
       .addPanel(
-        $.containerNetworkTransmitBytesPanel($._config.instance_names.compactor),
+        $.containerNetworkTransmitBytesPanelByComponent('compactor'),
       )
     )
     .addRow(
       $.row('Disk')
       .addPanel(
-        $.containerDiskWritesPanel('Disk writes', 'compactor'),
+        $.containerDiskWritesPanelByComponent('compactor'),
       )
       .addPanel(
-        $.containerDiskReadsPanel('Disk reads', 'compactor'),
+        $.containerDiskReadsPanelByComponent('compactor'),
       )
       .addPanel(
-        $.containerDiskSpaceUtilization('Disk space utilization', 'compactor'),
+        $.containerDiskSpaceUtilizationPanelByComponent('compactor'),
       )
     ) + {
       templating+: {
         list: [
-          // Do not allow to include all clusters/namespaces otherwise this dashboard
+          // Do not allow to include all namespaces otherwise this dashboard
           // risks to explode because it shows resources per pod.
-          l + (if (l.name == 'cluster' || l.name == 'namespace') then { includeAll: false } else {})
+          l + (if (l.name == 'namespace') then { includeAll: false } else {})
           for l in super.list
         ],
       },

@@ -9,10 +9,11 @@ package integration
 
 import (
 	"bytes"
-	"io/ioutil"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -25,6 +26,14 @@ var (
 	mergeFlags      = e2e.MergeFlags
 	generateSeries  = e2e.GenerateSeries
 	generateNSeries = e2e.GenerateNSeries
+
+	// These are the earliest and latest possible timestamps supported by the Prometheus API -
+	// the Prometheus API does not support omitting a time range from query requests,
+	// so we use these when we want to query over all time.
+	// These values are defined in github.com/prometheus/prometheus/web/api/v1/api.go but
+	// sadly not exported.
+	prometheusMinTime = time.Unix(math.MinInt64/1000+62135596801, 0).UTC()
+	prometheusMaxTime = time.Unix(math.MaxInt64/1000-62135596801, 999999999).UTC()
 )
 
 func getMimirProjectDir() string {
@@ -49,14 +58,14 @@ func writeFileToSharedDir(s *e2e.Scenario, dst string, content []byte) error {
 		return err
 	}
 
-	return ioutil.WriteFile(
+	return os.WriteFile(
 		dst,
 		content,
 		os.ModePerm)
 }
 
 func copyFileToSharedDir(s *e2e.Scenario, src, dst string) error {
-	content, err := ioutil.ReadFile(filepath.Join(getMimirProjectDir(), src))
+	content, err := os.ReadFile(filepath.Join(getMimirProjectDir(), src))
 	if err != nil {
 		return errors.Wrapf(err, "unable to read local file %s", src)
 	}

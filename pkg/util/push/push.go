@@ -7,6 +7,8 @@ package push
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -16,11 +18,15 @@ import (
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/util"
+	"github.com/grafana/mimir/pkg/util/globalerror"
 	"github.com/grafana/mimir/pkg/util/log"
 )
 
 // Func defines the type of the push. It is similar to http.HandlerFunc.
-type Func func(ctx context.Context, req *mimirpb.WriteRequest, cleanup func()) (*mimirpb.WriteResponse, error)
+type Func func(ctx context.Context, req *Request) (*mimirpb.WriteResponse, error)
+
+// parserFunc defines how to read the body the request from an HTTP request
+type parserFunc func(ctx context.Context, r *http.Request, maxSize int, buffer []byte, req *mimirpb.PreallocWriteRequest) ([]byte, error)
 
 // Wrap a slice in a struct so we can store a pointer in sync.Pool
 type bufHolder struct {
@@ -32,6 +38,7 @@ var bufferPool = sync.Pool{
 }
 
 const SkipLabelNameValidationHeader = "X-Mimir-SkipLabelNameValidation"
+const statusClientClosedRequest = 499
 
 // Handler is a http.Handler which accepts WriteRequests.
 func Handler(
@@ -39,6 +46,33 @@ func Handler(
 	sourceIPs *middleware.SourceIPExtractor,
 	allowSkipLabelNameValidation bool,
 	push Func,
+) http.Handler {
+	return handler(maxRecvMsgSize, sourceIPs, allowSkipLabelNameValidation, push, func(ctx context.Context, r *http.Request, maxRecvMsgSize int, dst []byte, req *mimirpb.PreallocWriteRequest) ([]byte, error) {
+		res, err := util.ParseProtoReader(ctx, r.Body, int(r.ContentLength), maxRecvMsgSize, dst, req, util.RawSnappy)
+		if errors.Is(err, util.MsgSizeTooLargeErr{}) {
+			err = distributorMaxWriteMessageSizeErr{actual: int(r.ContentLength), limit: maxRecvMsgSize}
+		}
+		return res, err
+	})
+}
+
+type distributorMaxWriteMessageSizeErr struct {
+	actual, limit int
+}
+
+func (e distributorMaxWriteMessageSizeErr) Error() string {
+	msgSizeDesc := fmt.Sprintf(" of %d bytes", e.actual)
+	if e.actual < 0 {
+		msgSizeDesc = ""
+	}
+	return globalerror.DistributorMaxWriteMessageSize.MessageWithPerInstanceLimitConfig(fmt.Sprintf("the incoming push request has been rejected because its message size%s is larger than the allowed limit of %d bytes", msgSizeDesc, e.limit), "distributor.max-recv-msg-size")
+}
+
+func handler(maxRecvMsgSize int,
+	sourceIPs *middleware.SourceIPExtractor,
+	allowSkipLabelNameValidation bool,
+	push Func,
+	parser parserFunc,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -50,36 +84,43 @@ func Handler(
 				logger = log.WithSourceIPs(source, logger)
 			}
 		}
-		bufHolder := bufferPool.Get().(*bufHolder)
-		var req mimirpb.PreallocWriteRequest
-		buf, err := util.ParseProtoReader(ctx, r.Body, int(r.ContentLength), maxRecvMsgSize, bufHolder.buf, &req, util.RawSnappy)
-		if err != nil {
-			level.Error(logger).Log("err", err.Error())
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			bufferPool.Put(bufHolder)
-			return
-		}
-		// If decoding allocated a bigger buffer, put that one back in the pool.
-		if len(buf) > len(bufHolder.buf) {
-			bufHolder.buf = buf
-		}
+		supplier := func() (*mimirpb.WriteRequest, func(), error) {
+			bufHolder := bufferPool.Get().(*bufHolder)
+			var req mimirpb.PreallocWriteRequest
+			buf, err := parser(ctx, r, maxRecvMsgSize, bufHolder.buf, &req)
+			if err != nil {
+				// Check for httpgrpc error, default to client error if parsing failed
+				if _, ok := httpgrpc.HTTPResponseFromError(err); !ok {
+					err = httpgrpc.Errorf(http.StatusBadRequest, err.Error())
+				}
 
-		cleanup := func() {
-			mimirpb.ReuseSlice(req.Timeseries)
-			bufferPool.Put(bufHolder)
-		}
+				bufferPool.Put(bufHolder)
+				return nil, nil, err
+			}
+			// If decoding allocated a bigger buffer, put that one back in the pool.
+			if buf = buf[:cap(buf)]; len(buf) > len(bufHolder.buf) {
+				bufHolder.buf = buf
+			}
 
-		if allowSkipLabelNameValidation {
-			req.SkipLabelNameValidation = req.SkipLabelNameValidation && r.Header.Get(SkipLabelNameValidationHeader) == "true"
-		} else {
-			req.SkipLabelNameValidation = false
-		}
+			if allowSkipLabelNameValidation {
+				req.SkipLabelNameValidation = req.SkipLabelNameValidation && r.Header.Get(SkipLabelNameValidationHeader) == "true"
+			} else {
+				req.SkipLabelNameValidation = false
+			}
 
-		if req.Source == 0 {
-			req.Source = mimirpb.API
+			cleanup := func() {
+				mimirpb.ReuseSlice(req.Timeseries)
+				bufferPool.Put(bufHolder)
+			}
+			return &req.WriteRequest, cleanup, nil
 		}
-
-		if _, err := push(ctx, &req.WriteRequest, cleanup); err != nil {
+		req := newRequest(supplier)
+		if _, err := push(ctx, req); err != nil {
+			if errors.Is(err, context.Canceled) {
+				http.Error(w, err.Error(), statusClientClosedRequest)
+				level.Warn(logger).Log("msg", "push request canceled", "err", err)
+				return
+			}
 			resp, ok := httpgrpc.HTTPResponseFromError(err)
 			if !ok {
 				http.Error(w, err.Error(), http.StatusInternalServerError)

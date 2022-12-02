@@ -6,6 +6,7 @@ metadata:
     {{- include "mimir.labels" (dict "ctx" . "component" "distributor" "memberlist" true) | nindent 4 }}
   annotations:
     {{- toYaml .Values.distributor.annotations | nindent 4 }}
+  namespace: {{ .Release.Namespace | quote }}
 spec:
   replicas: {{ .Values.distributor.replicas }}
   selector:
@@ -17,23 +18,14 @@ spec:
     metadata:
       labels:
         {{- include "mimir.podLabels" (dict "ctx" . "component" "distributor" "memberlist" true) | nindent 8 }}
-        {{- with .Values.distributor.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       annotations:
-{{- if .Values.useExternalConfig }}
-        checksum/config: {{ .Values.externalConfigVersion }}
-{{- else }}
-        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-{{- end}}
-        {{- with .Values.distributor.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "mimir.podAnnotations" (dict "ctx" . "component" "distributor") | nindent 8 }}
+      namespace: {{ .Release.Namespace | quote }}
     spec:
       serviceAccountName: {{ template "mimir.serviceAccountName" . }}
-    {{- if .Values.distributor.priorityClassName }}
+      {{- if .Values.distributor.priorityClassName }}
       priorityClassName: {{ .Values.distributor.priorityClassName }}
-    {{- end }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.distributor.securityContext | nindent 8 }}
       initContainers:
@@ -50,7 +42,16 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "-target=distributor"
+            - "-config.expand-env=true"
             - "-config.file=/etc/mimir/mimir.yaml"
+          {{- if .Values.ingester.zoneAwareReplication.migration.enabled }}
+            {{- if not .Values.ingester.zoneAwareReplication.migration.writePath }}
+            - "-ingester.ring.zone-awareness-enabled=false"
+            {{- end }}
+            {{- if .Values.ingester.zoneAwareReplication.migration.excludeDefaultZone }}
+            - "-ingester.ring.excluded-zones=zone-default"
+            {{- end }}
+          {{- end }}
           {{- range $key, $value := .Values.distributor.extraArgs }}
             - "-{{ $key }}={{ $value }}"
           {{- end }}
@@ -69,6 +70,8 @@ spec:
             - name: storage
               mountPath: "/data"
               subPath: {{ .Values.distributor.persistence.subPath }}
+            - name: active-queries
+              mountPath: /active-query-tracker
           ports:
             - name: http-metrics
               containerPort: {{ include "mimir.serverHttpListenPort" . }}
@@ -86,10 +89,20 @@ spec:
           resources:
             {{- toYaml .Values.distributor.resources | nindent 12 }}
           securityContext:
-            readOnlyRootFilesystem: true
+            {{- toYaml .Values.distributor.containerSecurityContext | nindent 12 }}
           env:
-            {{- if .Values.distributor.env }}
-              {{- toYaml .Values.distributor.env | nindent 12 }}
+            {{- with .Values.global.extraEnv }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.distributor.env }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- with .Values.global.extraEnvFrom }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.distributor.extraEnvFrom }}
+              {{- toYaml . | nindent 12 }}
             {{- end }}
 {{- if .Values.distributor.extraContainers }}
 {{ toYaml .Values.distributor.extraContainers | indent 8}}
@@ -98,13 +111,14 @@ spec:
         {{- toYaml .Values.distributor.nodeSelector | nindent 8 }}
       affinity:
         {{- toYaml .Values.distributor.affinity | nindent 8 }}
+      topologySpreadConstraints:
+        {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" . "component" "distributor") | nindent 8 }}
       tolerations:
         {{- toYaml .Values.distributor.tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.distributor.terminationGracePeriodSeconds }}
       volumes:
         - name: config
-          secret:
-            secretName: {{ tpl .Values.externalConfigSecretName . }}
+          {{- include "mimir.configVolume" . | nindent 10 }}
         {{- if .Values.enterprise.enabled }}
         - name: license
           secret:
@@ -117,5 +131,7 @@ spec:
 {{ toYaml .Values.distributor.extraVolumes | indent 8}}
 {{- end }}
         - name: storage
+          emptyDir: {}
+        - name: active-queries
           emptyDir: {}
 

@@ -10,8 +10,8 @@ package integration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"testing"
@@ -35,7 +35,10 @@ func TestQuerierRemoteRead(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	flags := mergeFlags(BlocksStorageFlags(), map[string]string{})
+	flags := mergeFlags(
+		BlocksStorageFlags(),
+		BlocksStorageS3Flags(),
+	)
 
 	// Start dependencies.
 	minio := e2edb.NewMinio(9000, blocksBucketName)
@@ -58,12 +61,12 @@ func TestQuerierRemoteRead(t *testing.T) {
 	c, err := e2emimir.NewClient(distributor.HTTPEndpoint(), "", "", "", "user-1")
 	require.NoError(t, err)
 
-	series, expectedVectors := generateSeries("series_1", now)
+	series, expectedVectors, _ := generateSeries("series_1", now)
 	res, err := c.Push(series)
 	require.NoError(t, err)
 	require.Equal(t, 200, res.StatusCode)
 
-	querier := e2emimir.NewQuerier("querier", consul.NetworkHTTPEndpoint(), BlocksStorageFlags())
+	querier := e2emimir.NewQuerier("querier", consul.NetworkHTTPEndpoint(), flags)
 	require.NoError(t, s.StartAndWaitReady(querier))
 
 	// Wait until the querier has updated the ring.
@@ -108,7 +111,7 @@ func TestQuerierRemoteRead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, httpResp.StatusCode)
 
-	compressed, err = ioutil.ReadAll(httpResp.Body)
+	compressed, err = io.ReadAll(httpResp.Body)
 	require.NoError(t, err)
 
 	uncompressed, err := snappy.Decode(nil, compressed)
@@ -133,7 +136,7 @@ func TestQuerierStreamingRemoteRead(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	flags := mergeFlags(BlocksStorageFlags(), map[string]string{
+	flags := mergeFlags(BlocksStorageFlags(), BlocksStorageS3Flags(), map[string]string{
 		"-distributor.ingestion-rate-limit": "1048576",
 		"-distributor.ingestion-burst-size": "1048576",
 	})
@@ -153,7 +156,7 @@ func TestQuerierStreamingRemoteRead(t *testing.T) {
 	// The distributor should have 512 tokens for the ingester ring and 1 for the distributor ring
 	require.NoError(t, distributor.WaitSumMetrics(e2e.Equals(512+1), "cortex_ring_tokens_total"))
 
-	querier := e2emimir.NewQuerier("querier", consul.NetworkHTTPEndpoint(), BlocksStorageFlags())
+	querier := e2emimir.NewQuerier("querier", consul.NetworkHTTPEndpoint(), flags)
 	require.NoError(t, s.StartAndWaitReady(querier))
 
 	// Wait until the querier has updated the ring.
@@ -214,6 +217,7 @@ func TestQuerierStreamingRemoteRead(t *testing.T) {
 
 	httpReq, err := http.NewRequestWithContext(httpReqCtx, "POST", "http://"+querier.HTTPEndpoint()+"/prometheus/api/v1/read", bytes.NewReader(compressed))
 	require.NoError(t, err)
+	httpReq.Header.Add("Accept-Encoding", "snappy")
 	httpReq.Header.Set("X-Scope-OrgID", "user-1")
 	httpReq.Header.Set("User-Agent", "Prometheus/1.8.2")
 	httpReq.Header.Set("X-Prometheus-Remote-Read-Version", "0.1.0")
@@ -229,7 +233,7 @@ func TestQuerierStreamingRemoteRead(t *testing.T) {
 	for {
 		var res prompb.ChunkedReadResponse
 		err := stream.NextProto(&res)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		require.NoError(t, err)

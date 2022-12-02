@@ -13,15 +13,16 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/runutil"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/runutil"
+
+	"github.com/grafana/mimir/pkg/storage/tsdb/block"
+	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 )
 
 var logger = log.NewLogfmtLogger(os.Stderr)
@@ -326,7 +327,7 @@ func GatherIndexHealthStats(logger log.Logger, blockDir string, minTime, maxTime
 
 func verifyChunks(l log.Logger, cr *chunks.Reader, lset labels.Labels, chks []chunks.Meta) {
 	for _, cm := range chks {
-		ch, err := cr.Chunk(cm.Ref)
+		ch, err := cr.Chunk(cm)
 		if err != nil {
 			level.Error(l).Log("msg", "failed to read chunk", "ref", cm.Ref, "err", err)
 			continue

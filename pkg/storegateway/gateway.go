@@ -19,16 +19,14 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/thanos-io/thanos/pkg/extprom"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/store/storepb"
+	"github.com/thanos-io/objstore"
 	"github.com/weaveworks/common/logging"
 	"github.com/weaveworks/common/tracing"
 
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
 	"github.com/grafana/mimir/pkg/storegateway/storegatewaypb"
-	"github.com/grafana/mimir/pkg/storegateway/threadpool"
+	"github.com/grafana/mimir/pkg/storegateway/storepb"
 	"github.com/grafana/mimir/pkg/util"
 	"github.com/grafana/mimir/pkg/util/activitytracker"
 	"github.com/grafana/mimir/pkg/util/validation"
@@ -52,15 +50,11 @@ var (
 // Config holds the store gateway config.
 type Config struct {
 	ShardingRing RingConfig `yaml:"sharding_ring" doc:"description=The hash ring configuration."`
-	// ThreadPoolSize controls the number of OS threads that are dedicated for handling requests
-	ThreadPoolSize uint `yaml:"thread_pool_size" category:"experimental"`
 }
 
 // RegisterFlags registers the Config flags.
 func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	cfg.ShardingRing.RegisterFlags(f, logger)
-
-	f.UintVar(&cfg.ThreadPoolSize, "store-gateway.thread-pool-size", uint(0), "Number of OS threads that are dedicated for handling requests. Set to 0 to disable use of dedicated OS threads for handling requests.")
 }
 
 // Validate the Config.
@@ -83,7 +77,6 @@ type StoreGateway struct {
 	logger     log.Logger
 	stores     *BucketStores
 	tracker    *activitytracker.ActivityTracker
-	threadpool *threadpool.Threadpool
 
 	// Ring used for sharding blocks.
 	ringLifecycler *ring.BasicLifecycler
@@ -125,7 +118,6 @@ func newStoreGateway(gatewayCfg Config, storageCfg mimir_tsdb.BlocksStorageConfi
 		storageCfg: storageCfg,
 		logger:     logger,
 		tracker:    tracker,
-		threadpool: threadpool.NewThreadpool(gatewayCfg.ThreadPoolSize, reg),
 		bucketSync: promauto.With(reg).NewCounterVec(prometheus.CounterOpts{
 			Name: "cortex_storegateway_bucket_sync_total",
 			Help: "Total number of times the bucket sync operation triggered.",
@@ -147,7 +139,7 @@ func newStoreGateway(gatewayCfg Config, storageCfg mimir_tsdb.BlocksStorageConfi
 
 	// Define lifecycler delegates in reverse order (last to be called defined first because they're
 	// chained via "next delegate").
-	delegate := ring.BasicLifecyclerDelegate(g)
+	delegate := ring.BasicLifecyclerDelegate(ring.NewInstanceRegisterDelegate(ring.JOINING, RingNumTokens))
 	delegate = ring.NewLeaveOnStoppingDelegate(delegate, logger)
 	delegate = ring.NewTokensPersistencyDelegate(gatewayCfg.ShardingRing.TokensFilePath, ring.JOINING, delegate, logger)
 	delegate = ring.NewAutoForgetDelegate(ringAutoForgetUnhealthyPeriods*gatewayCfg.ShardingRing.HeartbeatTimeout, delegate, logger)
@@ -165,7 +157,7 @@ func newStoreGateway(gatewayCfg Config, storageCfg mimir_tsdb.BlocksStorageConfi
 
 	shardingStrategy = NewShuffleShardingStrategy(g.ring, lifecyclerCfg.ID, lifecyclerCfg.Addr, limits, logger)
 
-	g.stores, err = NewBucketStores(storageCfg, shardingStrategy, bucketClient, limits, logLevel, logger, extprom.WrapRegistererWith(prometheus.Labels{"component": "store-gateway"}, reg))
+	g.stores, err = NewBucketStores(storageCfg, shardingStrategy, bucketClient, limits, logLevel, logger, prometheus.WrapRegistererWith(prometheus.Labels{"component": "store-gateway"}, reg))
 	if err != nil {
 		return nil, errors.Wrap(err, "create bucket stores")
 	}
@@ -191,7 +183,7 @@ func (g *StoreGateway) starting(ctx context.Context) (err error) {
 
 	// First of all we register the instance in the ring and wait
 	// until the lifecycler successfully started.
-	if g.subservices, err = services.NewManager(g.ringLifecycler, g.ring, g.threadpool); err != nil {
+	if g.subservices, err = services.NewManager(g.ringLifecycler, g.ring); err != nil {
 		return errors.Wrap(err, "unable to start store-gateway dependencies")
 	}
 
@@ -302,82 +294,40 @@ func (g *StoreGateway) syncStores(ctx context.Context, reason string) {
 	}
 }
 
+// Series implements the storegatewaypb.StoreGatewayServer interface.
 func (g *StoreGateway) Series(req *storepb.SeriesRequest, srv storegatewaypb.StoreGateway_SeriesServer) error {
 	ix := g.tracker.Insert(func() string {
 		return requestActivity(srv.Context(), "StoreGateway/Series", req)
 	})
 	defer g.tracker.Delete(ix)
 
-	_, err := g.threadpool.Execute(func() (interface{}, error) {
-		return nil, g.stores.Series(req, srv)
-	})
-
-	return err
+	return g.stores.Series(req, srv)
 }
 
-// LabelNames implements the Storegateway proto service.
+// LabelNames implements the storegatewaypb.StoreGatewayServer interface.
 func (g *StoreGateway) LabelNames(ctx context.Context, req *storepb.LabelNamesRequest) (*storepb.LabelNamesResponse, error) {
 	ix := g.tracker.Insert(func() string {
 		return requestActivity(ctx, "StoreGateway/LabelNames", req)
 	})
 	defer g.tracker.Delete(ix)
 
-	res, err := g.threadpool.Execute(func() (interface{}, error) {
-		return g.stores.LabelNames(ctx, req)
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return res.(*storepb.LabelNamesResponse), err
+	return g.stores.LabelNames(ctx, req)
 }
 
-// LabelValues implements the Storegateway proto service.
+// LabelValues implements the storegatewaypb.StoreGatewayServer interface.
 func (g *StoreGateway) LabelValues(ctx context.Context, req *storepb.LabelValuesRequest) (*storepb.LabelValuesResponse, error) {
 	ix := g.tracker.Insert(func() string {
 		return requestActivity(ctx, "StoreGateway/LabelValues", req)
 	})
 	defer g.tracker.Delete(ix)
 
-	res, err := g.threadpool.Execute(func() (interface{}, error) {
-		return g.stores.LabelValues(ctx, req)
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return res.(*storepb.LabelValuesResponse), err
+	return g.stores.LabelValues(ctx, req)
 }
 
 func requestActivity(ctx context.Context, name string, req interface{}) string {
 	user := getUserIDFromGRPCContext(ctx)
 	traceID, _ := tracing.ExtractSampledTraceID(ctx)
 	return fmt.Sprintf("%s: user=%q trace=%q request=%v", name, user, traceID, req)
-}
-
-func (g *StoreGateway) OnRingInstanceRegister(_ *ring.BasicLifecycler, ringDesc ring.Desc, instanceExists bool, instanceID string, instanceDesc ring.InstanceDesc) (ring.InstanceState, ring.Tokens) {
-	// When we initialize the store-gateway instance in the ring we want to start from
-	// a clean situation, so whatever is the state we set it JOINING, while we keep existing
-	// tokens (if any) or the ones loaded from file.
-	var tokens []uint32
-	if instanceExists {
-		tokens = instanceDesc.GetTokens()
-	}
-
-	takenTokens := ringDesc.GetTokens()
-	newTokens := ring.GenerateTokens(RingNumTokens-len(tokens), takenTokens)
-
-	// Tokens sorting will be enforced by the parent caller.
-	tokens = append(tokens, newTokens...)
-
-	return ring.JOINING, tokens
-}
-
-func (g *StoreGateway) OnRingInstanceTokens(_ *ring.BasicLifecycler, _ ring.Tokens) {}
-func (g *StoreGateway) OnRingInstanceStopping(_ *ring.BasicLifecycler)              {}
-func (g *StoreGateway) OnRingInstanceHeartbeat(_ *ring.BasicLifecycler, _ *ring.Desc, _ *ring.InstanceDesc) {
 }
 
 func createBucketClient(cfg mimir_tsdb.BlocksStorageConfig, logger log.Logger, reg prometheus.Registerer) (objstore.Bucket, error) {

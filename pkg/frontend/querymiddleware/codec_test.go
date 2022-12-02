@@ -9,11 +9,13 @@ package querymiddleware
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	jsoniter "github.com/json-iterator/go"
@@ -21,6 +23,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/user"
 
 	apierror "github.com/grafana/mimir/pkg/api/error"
@@ -112,6 +115,46 @@ type prometheusAPIResponse struct {
 type prometeheusResponseData struct {
 	Type   model.ValueType `json:"resultType"`
 	Result model.Value     `json:"result"`
+}
+
+func TestDecodeFailedResponse(t *testing.T) {
+	t.Run("internal error", func(t *testing.T) {
+		_, err := PrometheusCodec.DecodeResponse(context.Background(), &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader("something failed")),
+		}, nil, log.NewNopLogger())
+		require.Error(t, err)
+
+		resp, ok := httpgrpc.HTTPResponseFromError(err)
+		require.True(t, ok, "Error should have an HTTPResponse encoded")
+		require.Equal(t, int32(http.StatusInternalServerError), resp.Code)
+	})
+
+	t.Run("too many requests", func(t *testing.T) {
+		_, err := PrometheusCodec.DecodeResponse(context.Background(), &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader("something failed")),
+		}, nil, log.NewNopLogger())
+		require.Error(t, err)
+
+		require.True(t, apierror.IsAPIError(err))
+		resp, ok := apierror.HTTPResponseFromError(err)
+		require.True(t, ok, "Error should have an HTTPResponse encoded")
+		require.Equal(t, int32(http.StatusTooManyRequests), resp.Code)
+	})
+
+	t.Run("too large entry", func(t *testing.T) {
+		_, err := PrometheusCodec.DecodeResponse(context.Background(), &http.Response{
+			StatusCode: http.StatusRequestEntityTooLarge,
+			Body:       io.NopCloser(strings.NewReader("something failed")),
+		}, nil, log.NewNopLogger())
+		require.Error(t, err)
+
+		require.True(t, apierror.IsAPIError(err))
+		resp, ok := apierror.HTTPResponseFromError(err)
+		require.True(t, ok, "Error should have an HTTPResponse encoded")
+		require.Equal(t, int32(http.StatusRequestEntityTooLarge), resp.Code)
+	})
 }
 
 func TestResponseRoundtrip(t *testing.T) {
@@ -257,7 +300,7 @@ func TestResponseRoundtrip(t *testing.T) {
 			httpResponse := &http.Response{
 				StatusCode:    200,
 				Header:        headers,
-				Body:          ioutil.NopCloser(bytes.NewBuffer(body)),
+				Body:          io.NopCloser(bytes.NewBuffer(body)),
 				ContentLength: int64(len(body)),
 			}
 			decoded, err := PrometheusCodec.DecodeResponse(context.Background(), httpResponse, nil, log.NewNopLogger())
@@ -273,7 +316,7 @@ func TestResponseRoundtrip(t *testing.T) {
 			httpResponse = &http.Response{
 				StatusCode:    200,
 				Header:        headers,
-				Body:          ioutil.NopCloser(bytes.NewBuffer(body)),
+				Body:          io.NopCloser(bytes.NewBuffer(body)),
 				ContentLength: int64(len(body)),
 			}
 			encoded, err := PrometheusCodec.EncodeResponse(context.Background(), decoded)
@@ -581,7 +624,7 @@ func BenchmarkPrometheusCodec_DecodeResponse(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		_, err := PrometheusCodec.DecodeResponse(context.Background(), &http.Response{
 			StatusCode:    200,
-			Body:          ioutil.NopCloser(bytes.NewReader(encodedRes)),
+			Body:          io.NopCloser(bytes.NewReader(encodedRes)),
 			ContentLength: int64(len(encodedRes)),
 		}, nil, log.NewNopLogger())
 		require.NoError(b, err)
@@ -634,7 +677,7 @@ func mockPrometheusResponse(numSeries, numSamplesPerSeries int) *PrometheusRespo
 	return &PrometheusResponse{
 		Status: "success",
 		Data: &PrometheusData{
-			ResultType: "vector",
+			ResultType: "matrix",
 			Result:     stream,
 		},
 	}
@@ -699,6 +742,28 @@ func Test_DecodeOptions(t *testing.T) {
 			},
 			expected: &Options{
 				ShardingDisabled: true,
+			},
+		},
+		{
+			name: "custom instant query splitting",
+			input: &http.Request{
+				Header: http.Header{
+					instantSplitControlHeader: []string{"1h"},
+				},
+			},
+			expected: &Options{
+				InstantSplitInterval: time.Hour.Nanoseconds(),
+			},
+		},
+		{
+			name: "disable instant query splitting",
+			input: &http.Request{
+				Header: http.Header{
+					instantSplitControlHeader: []string{"0"},
+				},
+			},
+			expected: &Options{
+				InstantSplitDisabled: true,
 			},
 		},
 	} {

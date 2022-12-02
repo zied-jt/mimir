@@ -14,13 +14,11 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/tenant"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/prometheus/promql"
-
-	"github.com/grafana/dskit/tenant"
 
 	"github.com/grafana/mimir/pkg/cache"
 	"github.com/grafana/mimir/pkg/util"
@@ -41,13 +39,19 @@ type Config struct {
 	MaxRetries             int  `yaml:"max_retries" category:"advanced"`
 	ShardedQueries         bool `yaml:"parallelize_shardable_queries"`
 	CacheUnalignedRequests bool `yaml:"cache_unaligned_requests" category:"advanced"`
+
+	// CacheSplitter allows to inject a CacheSplitter to use for generating cache keys.
+	// If nil, the querymiddleware package uses a ConstSplitter with SplitQueriesByInterval.
+	CacheSplitter CacheSplitter `yaml:"-"`
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet.
 func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&cfg.MaxRetries, "query-frontend.max-retries-per-request", 5, "Maximum number of retries for a single request; beyond this, the downstream error is returned.")
-	f.DurationVar(&cfg.SplitQueriesByInterval, "query-frontend.split-queries-by-interval", 24*time.Hour, "Split queries by an interval and execute in parallel. You should use a multiple of 24 hours to optimize querying blocks. 0 to disable it.")
-	f.BoolVar(&cfg.AlignQueriesWithStep, "query-frontend.align-querier-with-step", false, "Mutate incoming queries to align their start and end with their step.")
+	f.DurationVar(&cfg.SplitQueriesByInterval, "query-frontend.split-queries-by-interval", 24*time.Hour, "Split range queries by an interval and execute in parallel. You should use a multiple of 24 hours to optimize querying blocks. 0 to disable it.")
+	f.BoolVar(&cfg.AlignQueriesWithStep, "query-frontend.align-queries-with-step", false, "Mutate incoming queries to align their start and end with their step.")
+	// TODO: Remove it in Mimir 2.6.0.
+	f.BoolVar(&cfg.AlignQueriesWithStep, "query-frontend.align-querier-with-step", false, "Mutate incoming queries to align their start and end with their step. It has been deprecated. Please use -query-frontend.align-queries-with-step instead.")
 	f.BoolVar(&cfg.CacheResults, "query-frontend.cache-results", false, "Cache query results.")
 	f.BoolVar(&cfg.ShardedQueries, "query-frontend.parallelize-shardable-queries", false, "True to enable query sharding.")
 	f.BoolVar(&cfg.CacheUnalignedRequests, "query-frontend.cache-unaligned-requests", false, "Cache requests that are not step-aligned.")
@@ -141,7 +145,7 @@ func NewTripperware(
 		return nil, err
 	}
 	return MergeTripperwares(
-		newActiveUsersTripperware(log, registerer),
+		newActiveUsersTripperware(registerer),
 		queryRangeTripperware,
 	), err
 }
@@ -155,6 +159,10 @@ func newQueryTripperware(
 	engineOpts promql.EngineOpts,
 	registerer prometheus.Registerer,
 ) (Tripperware, error) {
+	// Disable concurrency limits for sharded queries.
+	engineOpts.ActiveQueryTracker = nil
+	engine := promql.NewEngine(engineOpts)
+
 	// Metric used to keep track of each middleware execution duration.
 	metrics := newInstrumentMiddlewareMetrics(registerer)
 
@@ -186,6 +194,11 @@ func newQueryTripperware(
 			return !r.GetOptions().CacheDisabled
 		}
 
+		splitter := cfg.CacheSplitter
+		if splitter == nil {
+			splitter = ConstSplitter(cfg.SplitQueriesByInterval)
+		}
+
 		queryRangeMiddleware = append(queryRangeMiddleware, newInstrumentMiddleware("split_by_interval_and_results_cache", metrics, log), newSplitAndCacheMiddleware(
 			cfg.SplitQueriesByInterval > 0,
 			cfg.CacheResults,
@@ -194,21 +207,25 @@ func newQueryTripperware(
 			limits,
 			codec,
 			c,
-			constSplitter(cfg.SplitQueriesByInterval),
+			splitter,
 			cacheExtractor,
 			shouldCache,
 			log,
 			registerer,
 		))
 	}
+
 	queryInstantMiddleware := []Middleware{newLimitsMiddleware(limits, log)}
 
+	queryInstantMiddleware = append(
+		queryInstantMiddleware,
+		newSplitInstantQueryByIntervalMiddleware(limits, log, engine, registerer),
+	)
+
 	if cfg.ShardedQueries {
-		// Disable concurrency limits for sharded queries.
-		engineOpts.ActiveQueryTracker = nil
 		queryshardingMiddleware := newQueryShardingMiddleware(
 			log,
-			promql.NewEngine(engineOpts),
+			engine,
 			limits,
 			registerer,
 		)
@@ -234,7 +251,6 @@ func newQueryTripperware(
 		queryrange := newLimitedParallelismRoundTripper(next, codec, limits, queryRangeMiddleware...)
 		instant := defaultInstantQueryParamsRoundTripper(
 			newLimitedParallelismRoundTripper(next, codec, limits, queryInstantMiddleware...),
-			time.Now,
 		)
 		return RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 			switch {
@@ -249,7 +265,7 @@ func newQueryTripperware(
 	}, nil
 }
 
-func newActiveUsersTripperware(logger log.Logger, registerer prometheus.Registerer) Tripperware {
+func newActiveUsersTripperware(registerer prometheus.Registerer) Tripperware {
 	// Per tenant query metrics.
 	queriesPerTenant := promauto.With(registerer).NewCounterVec(prometheus.CounterOpts{
 		Name: "cortex_query_frontend_queries_total",
@@ -257,10 +273,7 @@ func newActiveUsersTripperware(logger log.Logger, registerer prometheus.Register
 	}, []string{"op", "user"})
 
 	activeUsers := util.NewActiveUsersCleanupWithDefaultValues(func(user string) {
-		err := util.DeleteMatchingLabels(queriesPerTenant, map[string]string{"user": user})
-		if err != nil {
-			level.Warn(logger).Log("msg", "failed to remove cortex_query_frontend_queries_total metric for user", "user", user)
-		}
+		queriesPerTenant.DeletePartialMatch(prometheus.Labels{"user": user})
 	})
 
 	// Start cleanup. If cleaner stops or fail, we will simply not clean the metrics for inactive users.
@@ -294,12 +307,20 @@ func isInstantQuery(path string) bool {
 	return strings.HasSuffix(path, instantQueryPathSuffix)
 }
 
-func defaultInstantQueryParamsRoundTripper(next http.RoundTripper, now func() time.Time) http.RoundTripper {
+func defaultInstantQueryParamsRoundTripper(next http.RoundTripper) http.RoundTripper {
 	return RoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if isInstantQuery(r.URL.Path) && !r.URL.Query().Has("time") {
+		if isInstantQuery(r.URL.Path) && !r.Form.Has("time") && !r.URL.Query().Has("time") {
+			nowUnixStr := strconv.FormatInt(time.Now().Unix(), 10)
+
 			q := r.URL.Query()
-			q.Add("time", strconv.FormatInt(time.Now().Unix(), 10))
+			q.Add("time", nowUnixStr)
 			r.URL.RawQuery = q.Encode()
+
+			// If form was already parsed, add this param to the form too.
+			// (The form doesn't have "time", otherwise we'd not be here)
+			if r.Form != nil {
+				r.Form.Set("time", nowUnixStr)
+			}
 		}
 		return next.RoundTrip(r)
 	})

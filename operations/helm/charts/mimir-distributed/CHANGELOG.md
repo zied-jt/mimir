@@ -1,5 +1,20 @@
 # Changelog
 
+## Deprecated features
+
+This section contains deprecated features and interfaces that the chart exposes. The deprecation policy of the chart is to
+remove a deprecated item from the third major release after it has been deprecated it.
+
+### List
+
+* GEM gateway: remove port 8080 on the Service resource. Deprecated in `3.1.0` and will be removed in `6.0.0`.
+  * __How to migrate__: replace usages of port 8080 with port 80; these usages can be in dashboards, Prometheus remote-write configurations, or automation for updating rules.
+* NGINX configuration via `nginx` top-level values sections is being merged with by the `gateway` section. The
+  `nginx` section is deprecated in `4.0.0` and will be removed in `7.0.0`.
+  * __How to migrate__: refer to [Migrate to using the unified proxy deployment for NGINX and GEM gateway](https://grafana.com/docs/mimir/latest/operators-guide/deploying-grafana-mimir/migrate-to-unified-gateway-deployment/)
+
+## Format of changelog
+
 This changelog is continued from `enterprise-metrics` after Grafana Enterprise Metrics was added to `mimir-distributed` in PR #1203.
 All notable changes to this chart will be documented in this file.
 
@@ -10,6 +25,225 @@ Entries should be ordered as follows:
 - [BUGFIX]
 
 Entries should include a reference to the Pull Request that introduced the change.
+
+## main / unreleased
+
+* [FEATURE] Support deploying NGINX via the `gateway` section. The `nginx` section will be removed in `7.0.0`. See
+  [Migrate to using the unified proxy deployment for NGINX and GEM gateway](https://grafana.com/docs/mimir/latest/operators-guide/deploying-grafana-mimir/migrate-to-unified-gateway-deployment/)
+* [CHANGE] **breaking change** **Data loss without action.** Enables [zone-aware replication](https://grafana.com/docs/mimir/latest/operators-guide/configure/configure-zone-aware-replication/) for ingesters and store-gateways by default. #2778
+  - If you are **upgrading** an existing installation:
+    - Turn off zone-aware replication, by setting the following values:
+      ```yaml
+      ingester:
+        zoneAwareReplication:
+          enabled: false
+      store_gateway:
+        zoneAwareReplication:
+          enabled: false
+      rollout_operator:
+        enabled: false
+      ```
+    - After the upgrade you can migrate to the new zone-aware replication setup, see [Migrate from single zone to zone-aware replication with Helm](https://grafana.com/docs/mimir/latest/migration-guide/migrating-from-single-zone-with-helm/) guide.
+  - If you are **installing** the chart:
+    - Ingesters and store-gateways are installed with 3 logical zones, which means both ingesters and store-gateways start 3 replicas each.
+* [CHANGE] **breaking change** Reduce the number of ingesters in small.yaml form 4 to 3. This should be more accurate size for the scale of 1M AS. Before upgrading refer to [Scaling down ingesters](https://grafana.com/docs/mimir/latest/operators-guide/run-production-environment/scaling-out/#scaling-down-ingesters) to scale down `ingester-3`. Alternatively override the number of ingesters to 4. #3035
+* [CHANGE] **breaking change** Update minio subchart from `4.0.12` to `5.0.0`, which inherits the breaking change of minio gateway mode being removed. #3352
+* [CHANGE] Nginx: uses the headless service of alertmanager, ingester and store-gateway as backends, because there are 3 separate services for each zone. #2778
+* [CHANGE] Gateway: uses the headless service of alertmanager as backend, because there are 3 separate services for each zone. #2778
+* [CHANGE] Update sizing plans (small.yaml, large.yaml, capped-small.yaml, capped-large.yaml). These reflect better how we recommend running Mimir and GEM in production. most plans have adjusted number of replicas and resource requirements. The only **breaking change** is in small.yaml which has reduced the number of ingesters from 4 to 3; for scaling down ingesters refer to [Scaling down ingesters](https://grafana.com/docs/mimir/latest/operators-guide/run-production-environment/scaling-out/#scaling-down-ingesters). #3035
+* [CHANGE] Change default securityContext of Mimir and GEM Pods and containers, so that they comply with a [Restricted pod security policy](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
+  This changes what user the containers run as from `root` to `10001`. The files in the Pods' attached volumes should change ownership with the `fsGroup` change;
+  most CSI drivers support changing the value of `fsGroup`, or kubelet is able to do the ownership change instead of the CSI driver. This is not the case for the HostPath driver.
+  If you are using HostPath or another driver that doesn't support changing `fsGroup`, then you have a couple of options: A) set the `securityContext` of all Mimir and GEM components to `{}` in your values file; B) delete PersistentVolumes and PersistentVolumeClaims and upgrade the chart; C) add an initContainer to all components that use a PVC that changes ownership of the mounted volumes.
+  If you take no action and `fsGroup` is not supported by your CSI driver, then components will fail to start. #3007
+* [CHANGE] Restrict Pod seccomp profile to `runtime/default` in the default PodSecurityPolicy of the chart. #3007
+* [CHANGE] Use the chart's service account for metamonitoring instead of creating one specific to metamonitoring. #3350
+* [CHANGE] Use mimir for the nginx ingress example #3336
+* [ENHANCEMENT] Metamonitoring: If enabled and no URL is configured, then metamonitoring metrics will be sent to
+  Mimir under the `metamonitoring` tenant; this enhancement does not apply to GEM. #3176
+* [ENHANCEMENT] Improve default rollout strategies. Now distributor, overrides_exporter, querier, query_frontend, admin_api, gateway, and graphite components can be upgraded more quickly and also can be rolled out with a single replica without downtime. #3029
+* [ENHANCEMENT] Metamonitoring: make scrape interval configurable. #2945
+* [ENHANCEMENT] Update compactor configuration to match Jsonnet. #3353
+  * This also now matches production configuration from Grafana Cloud
+  * Set `compactor.compaction_interval` to `30m` (Decreased from `1h`)
+  * Set `compactor.deletion_delay` to `2h` (Decreased from `12h`)
+  * Set `compactor.max_closing_blocks_concurrency` to `2` (Increased from `1`)
+  * Set `compactor.max_opening_blocks_concurrency` to `4` (Increased from `1`)
+  * Set `compactor.symbols_flushers_concurrency` to `4` (Increased from `1`)
+  * Set `compactor.sharding_ring.wait_stability_min_duration` to `1m` (Increased from `0`)
+* [ENHANCEMENT] Update read path configuration to match Jsonnet #2998
+  * This also now matches production configuration from Grafana Cloud
+  * Set `blocks_storage.bucket_store.max_chunk_pool_bytes` to `12GiB` (Increased from `2GiB`)
+  * Set `blocks_storage.bucket_Store.index_cache.memcached.max_item_size` to `5MiB` (Decreased from `15MiB`)
+  * Set `frontend.grpc_client_config.max_send_msg_size` to `400MiB` (Increased from `100MiB`)
+  * Set `limits.max_cache_freshness` to `10m` (Increased from `1m`)
+  * Set `limits.max_query_parallelism` to `240` (Increased from `224`)
+  * Set `query_scheduler.max_outstanding_requests_per_tenant` to `800` (Decreased from `1600`)
+  * Set `store_gateway.sharding_ring.wait_stability_min_duration` to `1m` (Increased from `0`)
+  * Set `frontend.results_cache.memcached.timeout` to `500ms` (Increased from `100ms`)
+  * Unset `frontend.align_queries_with_step` (Was `true`, now defaults to `false`)
+  * Unset `frontend.log_queries_longer_than` (Was `10s`, now defaults to `0`, which is disabled)
+* [ENHANCEMENT] Added `usage_stats.installation_mode` configuration to track the installation mode via the anonymous usage statistics. #3294
+* [ENHANCEMENT] Update grafana-agent-operator subchart to 0.2.8. Notable changes are being able to configure Pod's SecurityContext and Container's SecurityContext. #3350
+* [ENHANCEMENT] Add possibility to configure fallbackConfig for alertmanager and set it by default. Now tenants without an alertmanager config will not see errors accessing the alertmanager UI or when using the alertmanager API. #3360
+* [ENHANCEMENT] Add ability to set a `schedulerName` for alertmanager, compactor, ingester and store-gateway. This is needed for example for some storage providers. #3140
+* [BUGFIX] Fix an issue that caused metamonitoring secrets to be created incorrectly #3170
+* [BUGFIX] Nginx: fixed `imagePullSecret` value reference inconsistency. #3208
+* [BUGFIX] Move the activity tracker log from /data to /active-query-tracker to remove ignore log messages. #3169
+* [BUGFIX] Fix Invalid ingress nginx config due to newline in prometheusHttpPrefix Helm named templates. #3088
+* [BUGFIX] Added missing endpoint for OTLP in NGINX #3479
+
+## 3.2.0
+
+* [CHANGE] Nginx: replace topology key previously used in `podAntiAffinity` (`failure-domain.beta.kubernetes.io/zone`) with a different one `topologySpreadConstraints` (`kubernetes.io/hostname`). #2722
+* [CHANGE] Use `topologySpreadConstraints` instead of `podAntiAffinity` by default. #2722
+  - **Important**: if you are not using the sizing plans (small.yaml, large.yaml, capped-small.yaml, capped-large.yaml) in production, you should reintroduce pod affinity rules for the ingester and store-gateway. This also fixes a missing label selector for the ingester.
+     Merge the following to your custom values file:
+     ```yaml
+     ingester:
+       affinity:
+         podAntiAffinity:
+           requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: target
+                      operator: In
+                      values:
+                        - ingester
+                topologyKey: 'kubernetes.io/hostname'
+              - labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - ingester
+                topologyKey: 'kubernetes.io/hostname'
+     store_gateway:
+       affinity:
+         podAntiAffinity:
+           requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: target
+                      operator: In
+                      values:
+                        - store-gateway
+                topologyKey: 'kubernetes.io/hostname'
+              - labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - store-gateway
+                topologyKey: 'kubernetes.io/hostname'
+     ```
+* [CHANGE] Ingresses for the GEM gateway and nginx will no longer render on Kubernetes versions <1.19. #2872
+* [FEATURE] Add support for OpenShift Routes for Nginx #2908
+* [FEATURE] Add support for `topologySpreadConstraints` to all components; add `topologySpreadConstraints` to GEM gateway, admin-api, and alertmanager, which did not have `podAntiAffinity` previously. #2722
+* [ENHANCEMENT] Document `kubeVersionOverride`. If you rely on `helm template`, use this in your values to set the Kubernetes version. If unset helm will use the kubectl client version as the Kubernetes version with `helm template`, which may cause the chart to render incompatible manifests for the actual server version. #2872
+* [ENHANCEMENT] Support autoscaling/v2 HorizontalPodAutoscaler for nginx autoscaling. This is used when deploying on Kubernetes >= 1.25. #2848
+* [ENHANCEMENT] Monitoring: Add additional flags to conditionally enable log / metric scraping. #2936
+* [ENHANCEMENT] Add podAntiAffinity to sizing plans (small.yaml, large.yaml, capped-small.yaml, capped-large.yaml). #2906
+* [ENHANCEMENT] Add ability to configure and run mimir-continuous-test. #3117
+* [BUGFIX] Fix wrong label selector in ingester anti affinity rules in the sizing plans. #2906
+* [BUGFIX] Query-scheduler no longer periodically terminates connections from query-frontends and queriers. This caused some queries to time out and EOF errors in the logs. #3262
+
+## 3.1.0
+
+* [CHANGE] **breaking change** Update minio deprecated helm chart (<https://helm.min.io/>) to the supported chart's version (<https://charts.min.io/>). #2427
+  - Renamed helm config values `minio.accessKey` to `minio.rootUser`.
+  - Renamed helm config values `minio.secretKey` to `minio.rootPassword`.
+  - Minio container images are now loaded from quay.io instead of Docker Hub. Set `minio.image.repository` value to override the default behavior.
+* [CHANGE] Enable [query sharding](https://grafana.com/docs/mimir/latest/operators-guide/architecture/query-sharding/) by default. If you override the value of `mimir.config`, then take a look at `mimir.config` in the `values.yaml` from this version of the chart and incorporate the differences. If you override `mimir.config`, then consider switching to `mimir.structuredConfig`. To disable query sharding set `mimir.structuredConfig.frontend.parallelize_shardable_queries` to `false`. #2655
+* [FEATURE] Add query-scheduler, which is now enabled by default. If you have copied the `mimir.config`, then update it to correctly configure the query-frontend and the querier. #2087
+* [FEATURE] Added support to run graphite-proxy alongside GEM. It is disabled by default. Set `graphite.enabled=true` in your values config to get it running. #2711
+* [ENHANCEMENT] Add backfill endpoints to Nginx configuration. #2478
+* [ENHANCEMENT] Add `namespace` to smoke-test helm template to allow the job to be deployed within the same namespace as the rest of the deployment. #2515
+* [ENHANCEMENT] Memberlist now uses DNS service-discovery by default. #2549 #2561
+* [ENHANCEMENT] The Mimir configuration parameters `server.http_listen_port` and `server.grpc_listen_port` are now configurable in `mimir.structuredConfig`. #2561
+* [ENHANCEMENT] Default to injecting the `no_auth_tenant` from the Mimir configuration as the value for `X-Scope-OrgID` in nginx. #2614
+* [ENHANCEMENT] Default `ingester.ring.tokens-file-path` and `store-gateway.sharding-ring.tokens-file-path` to `/data/tokens` to prevent resharding on restarts. #2726
+* [ENHANCEMENT] Upgrade memcached image tag to `memcached:1.6.16-alpine`. #2740
+* [ENHANCEMENT] Upgrade nginx image tag to `nginxinc/nginx-unprivileged:1.22-alpine`. #2742
+* [ENHANCEMENT] Upgrade minio subchart to `4.0.12`. #2759
+* [ENHANCEMENT] Update agent-operator subchart to `0.2.5`. #3009
+* [BUGFIX] `nginx.extraArgs` are now actually passed to the nginx container. #2336
+* [BUGFIX] Add missing `containerSecurityContext` to alertmanager and tokengen job. #2416
+* [BUGFIX] Add missing `containerSecutiryContext` to memcached exporter containers. #2666
+* [BUGFIX] Do not use undocumented `mulf` function in templates. #2752
+* [BUGFIX] Open port 80 for the Enterprise `gateway` service so that the read and write address reported by NOTES.txt is correct. Also deprecate the current default of 8080. #2860
+* [BUGFIX] Periodically rebalance gRPC connection between GEM gateway and distributors after scale out of the distributors. #2862
+* [BUGFIX] Remove PodSecurityPolicy when running against Kubernetes >= 1.25. #2870
+
+## 3.0.0
+
+* [CHANGE] **breaking change** The minimal Kubernetes version is now 1.20. This reflects the fact that Grafana does not test with older versions. #2297
+* [CHANGE] **breaking change** Make `ConfigMap` the default for `configStorageType`. This means that the Mimir (or Enterprise Metrics) configuration is now created in and loaded from a ConfigMap instead of a Secret. #2277
+  - Set to `Secret` to keep existing way of working. See related #2031, #2017, #2089.
+  - In case the configuration is loaded from an external Secret, `useExternalConfig=true`, then `configStorageType` must be set to `Secret`.
+  - Having the configuration in a ConfigMap means that `helm template` now shows the configuration directly and `helm diff upgrade` can show the changes to the configuration.
+* [CHANGE] Enable multi-tenancy by default. This means `multitenancy_enabled` is now `true` for both Mimir and Enterprise Metrics. Nginx will inject `X-Scope-OrgID=anonymous` header if the header is not present, ensuring backwards compatibility. #2117
+* [CHANGE] **breaking change** The value `serviceMonitor` and everything under it is moved to `metaMonitoring.serviceMonitor` to group all meta-monitoring settings under one section. #2236
+* [CHANGE] Added support to install on OpenShift. #2219
+  - **breaking change** The value `rbac.pspEnabled` was removed.
+  - Added new `rbac.type` option. Allowed values are `psp` and `scc`, for Pod Security Policy and Security Context Constraints (OpenShift) respectively.
+  - Added `rbac.create` option to enable/disable RBAC configuration.
+  - mc path in Minio changed to be compatible with OpenShift security.
+* [CHANGE] **breaking change** Chart now uses custom memcached templates to remove bitnami dependency. There are changes to the Helm values, listed below. #2064
+  - The `memcached` section now contains common values shared across all memcached instances.
+  - New `memcachedExporter` section was added to configure memcached metrics exporter.
+  - New `chunks-cache` section was added that refers to previous `memcached` configuration.
+  - The section `memcached-queries` is renamed to `index-cache`.
+  - The section `memcached-metadata` is renamed to `metadata-cache`.
+  - The section `memcached-results` is renamed to `results-cache`.
+  - The value `memcached-*.replicaCount` is replaced with `*-cache.replicas` to align with the rest of the services.
+    - Renamed `memcached.replicaCount` to `chunks-cache.replicas`.
+    - Renamed `memcached-queries.replicaCount` to `index-cache.replicas`.
+    - Renamed `memcached-metadata.replicaCount` to `metadata-cache.replicas`.
+    - Renamed `memcached-results.replicaCount` to `results-cache.replicas`.
+  - All memcached instances now share the same `ServiceAccount` that the chart uses for its services.
+  - The value `memcached-*.architecture` was removed.
+  - The value `memcached-*.arguments` was removed, the default arguments are now encoded in the template. Use `*-cache.extraArgs` to provide additional arguments as well as the values `*-cache.allocatedMemory`, `*-cache.maxItemMemory` and `*-cache.port` to set the memcached command line flags `-m`, `-I` and `-u`.
+  - The remaining arguments are aligned with the rest of the chart's services, please consult the values file to check whether a parameter exists or was renamed.
+* [CHANGE] Change default value for `blocks_storage.bucket_store.chunks_cache.memcached.timeout` to `450ms` to increase use of cached data. #2035
+* [CHANGE] Remove setting `server.grpc_server_max_recv_msg_size` and `server.grpc_server_max_send_msg_size` to 100MB, since it is the default now, see #1884. #2300
+* [FEATURE] Add `mimir-continuous-test` in smoke-test mode. Use `helm test` to run a smoke test of the read + write path.
+* [FEATURE] Add meta-monitoring via the Grafana Agent Kubernetes operator: scrape metrics and collect logs from Mimir pods and ship them to a remote. #2068
+* [ENHANCEMENT] Update memcached statefulset manifest #2321
+  - Added imagePullSecrets block to pull images from private registry
+  - Added resources block for memcachedExporter
+* [ENHANCEMENT] ServiceMonitor object will now have default values based on release namesapce in the `namespace` and `namespaceSelector` fields. #2123
+* [ENHANCEMENT] Set the `namespace` metadata field for all kubernetes objects to enable using `--namespace` correctly with Helm even if the specified namespace does not exist. #2123
+* [ENHANCEMENT] The new value `serviceMonitor.clusterLabel` controls whether to add a `cluster` label and with what content to ServiceMonitor metrics. #2125
+* [ENHANCEMENT] Set the flag `ingester.ring.instance-availability-zone` to `zone-default` for ingesters. This is the first step of introducing multi-zone ingesters. #2114
+* [ENHANCEMENT] Add `mimir.structuredConfig` for adding and modifing `mimir.config` values after template evaulation. It can be used to alter individual values in the configuration and it's structured YAML instead of text. #2100
+* [ENHANCEMENT] Add `global.podAnnotations` which can add POD annotations to PODs directly controlled by this chart (mimir services, nginx). #2099
+* [ENHANCEMENT] Introduce the value `configStorageType` which can be either `ConfigMap` or `Secret`. This value sets where to store the Mimir/GEM application configuration. When using the value `ConfigMap`, make sure that any secrets, passwords, keys are injected from the environment from a separate `Secret`. See also: #2031, #2017. #2089
+* [ENHANCEMENT] Add `global.extraEnv` and `global.extraEnvFrom` to values. This enables setting common environment variables and common injection of secrets to the POD environment of Mimir/GEM services and Nginx. Memcached and minio are out of scope for now. #2031
+* [ENHANCEMENT] Add `extraEnvFrom` capability to all Mimir services to enable injecting secrets via environment variables. #2017
+* [ENHANCEMENT] Enable `-config.expand-env=true` option in all Mimir services to be able to take secrets/settings from the environment and inject them into the Mimir configuration file. #2017
+* [ENHANCEMENT] Add a simple test for enterprise installation #2027
+* [ENHANCEMENT] Check for the containerSecurityContext in values file. #2112
+* [ENHANCEMENT] Add `NOTES.txt` to show endpoints URLs for the user at install/upgrade. #2189
+* [ENHANCEMENT] Add ServiceMonitor for overrides-exporter. #2068
+* [ENHANCEMENT] Add `nginx.resolver` for allow custom resolver in nginx configuration and `nginx.extraContainers` which allow add side containers to the nginx deployment #2196
+
+## 2.1.0
+
+* [ENHANCEMENT] Bump image version to 2.1 #2001
+  - For Grafana Mimir, see the release notes here: [Grafana Mimir 2.1](https://grafana.com/docs/mimir/latest/release-notes/v2.1/)
+  - For Grafana Enterprise Metrics, see the release notes here: [Grafana Enterprise Metrics 2.1](https://grafana.com/docs/enterprise-metrics/v2.1.x/release-notes/v2-1/)
+* [ENHANCEMENT] Disable `ingester.ring.unregister-on-shutdown` and `distributor.extend-writes` #1994
+  - This will prevent resharding every series during a rolling ingester restart
+  - Under some circumstances the previous values (both enabled) could cause write path degredation during rolling restarts
+* [ENHANCEMENT] Add support for the results cache used by the query frontend #1993
+  - This will result in additional resource usage due to the addition of one or
+    more memcached replicas. This applies when using small.yaml, large.yaml,
+    capped-large.yaml, capped-small.yaml, or when setting
+    `memcached-results.enabled=true`
+* [BUGFIX] Set up using older bitnami chart repository for memcached as old charts were deleted from the current one. #1998
+* [BUGFIX] Use grpc round-robin for distributor clients in GEM gateway and self-monitoring
+  - This utilizes an additional headless service for the distributor pods
 
 ## 2.0.14
 

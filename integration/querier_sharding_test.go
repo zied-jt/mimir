@@ -69,7 +69,7 @@ func runQuerierShardingTest(t *testing.T, cfg querierShardingTestConfig) {
 	consul := e2edb.NewConsul()
 	require.NoError(t, s.StartAndWaitReady(consul, memcached))
 
-	flags := mergeFlags(BlocksStorageFlags(), map[string]string{
+	flags := mergeFlags(BlocksStorageFlags(), BlocksStorageS3Flags(), map[string]string{
 		"-query-frontend.cache-results":                     "true",
 		"-query-frontend.results-cache.backend":             "memcached",
 		"-query-frontend.results-cache.memcached.addresses": "dns+" + memcached.NetworkEndpoint(e2ecache.MemcachedPort),
@@ -124,7 +124,7 @@ func runQuerierShardingTest(t *testing.T, cfg querierShardingTestConfig) {
 	require.NoError(t, err)
 
 	var series []prompb.TimeSeries
-	series, expectedVector := generateSeries("series_1", now)
+	series, expectedVector, _ := generateSeries("series_1", now)
 
 	res, err := distClient.Push(series)
 	require.NoError(t, err)

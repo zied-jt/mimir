@@ -6,7 +6,7 @@
 package api
 
 import (
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -144,7 +144,7 @@ func TestConfigDiffHandler(t *testing.T) {
 			},
 			expectedStatusCode: 500,
 			expectedBody: "yaml: unmarshal errors:\n" +
-				"  line 1: cannot unmarshal !!str `x` into map[interface {}]interface {}\n",
+				"  line 1: cannot unmarshal !!str `x` into map[string]interface {}\n",
 		},
 	} {
 		defaultCfg := newDefaultDiffConfigMock()
@@ -165,7 +165,7 @@ func TestConfigDiffHandler(t *testing.T) {
 			resp := w.Result()
 			assert.Equal(t, tc.expectedStatusCode, resp.StatusCode)
 
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.expectedBody, string(body))
 		})
@@ -194,7 +194,7 @@ func TestConfigOverrideHandler(t *testing.T) {
 	resp := w.Result()
 	assert.Equal(t, 200, resp.StatusCode)
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte("config"), body)
 }

@@ -65,7 +65,7 @@ func Usage(printAll bool, configs ...interface{}) error {
 		name := getFlagName(fl)
 		if len(name) > 0 {
 			b.WriteString(" ")
-			b.WriteString(name)
+			b.WriteString(strings.ReplaceAll(name, " ", "-"))
 		}
 		// Four spaces before the tab triggers good alignment
 		// for both 4- and 8-space tab stops.
@@ -139,7 +139,7 @@ func parseStructure(structure interface{}, fields map[uintptr]reflect.StructFiel
 		fields[fieldValue.Addr().Pointer()] = field
 
 		// Recurse if a struct
-		if field.Type.Kind() != reflect.Struct || ignoreStructType(field.Type) {
+		if field.Type.Kind() != reflect.Struct || ignoreStructType(field.Type) || !field.IsExported() {
 			continue
 		}
 
@@ -198,6 +198,20 @@ func getFlagName(fl *flag.Flag) string {
 		switch v.Type().String() {
 		case "*flagext.Secret":
 			return "string"
+		case "*flagext.StringSlice":
+			return "string"
+		case "*flagext.StringSliceCSV":
+			return "comma-separated list of strings"
+		case "*flagext.CIDRSliceCSV":
+			return "comma-separated list of strings"
+		case "*flagext.URLValue":
+			return "string"
+		case "*url.URL":
+			return "string"
+		case "*model.Duration":
+			return "duration"
+		case "*tsdb.DurationList":
+			return "comma-separated list of durations"
 		}
 	}
 

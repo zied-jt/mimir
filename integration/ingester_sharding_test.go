@@ -25,6 +25,7 @@ import (
 
 func TestIngesterSharding(t *testing.T) {
 	const numSeriesToPush = 1000
+	const queryIngestersWithinSecs = 5
 
 	tests := map[string]struct {
 		tenantShardSize             int
@@ -46,13 +47,17 @@ func TestIngesterSharding(t *testing.T) {
 			require.NoError(t, err)
 			defer s.Close()
 
-			flags := BlocksStorageFlags()
+			flags := mergeFlags(
+				BlocksStorageFlags(),
+				BlocksStorageS3Flags(),
+			)
 			flags["-distributor.ingestion-tenant-shard-size"] = strconv.Itoa(testData.tenantShardSize)
-
-			// Enable shuffle sharding on read path but not lookback, otherwise all ingesters would be
-			// queried being just registered.
-			flags["-querier.query-store-after"] = "0"
-			flags["-querier.shuffle-sharding-ingesters-lookback-period"] = "1ns"
+			// We're verifying that shuffle sharding on the read path works so we need to set `query-ingesters-within`
+			// to a small enough value that they'll have been part of the ring for long enough by the time we attempt
+			// to query back the values we wrote to them. If they _haven't_ been part of the ring for long enough, the
+			// query would be sent to all ingesters and our test wouldn't really be testing anything.
+			flags["-querier.query-ingesters-within"] = fmt.Sprintf("%ds", queryIngestersWithinSecs)
+			flags["-ingester.ring.heartbeat-period"] = "1s"
 
 			// Start dependencies.
 			consul := e2edb.NewConsul()
@@ -77,6 +82,11 @@ func TestIngesterSharding(t *testing.T) {
 				labels.MustNewMatcher(labels.MatchEqual, "name", "ingester"),
 				labels.MustNewMatcher(labels.MatchEqual, "state", "ACTIVE"))))
 
+			// Yes, we're sleeping in this test. We need to make sure that the ingesters have been part
+			// of the ring long enough before writing metrics to them to ensure that only the shuffle
+			// sharded ingesters will be queried for them when we go to verify the series written.
+			time.Sleep((queryIngestersWithinSecs + 1) * time.Second)
+
 			// Push series.
 			now := time.Now()
 			expectedVectors := map[string]model.Vector{}
@@ -86,7 +96,7 @@ func TestIngesterSharding(t *testing.T) {
 
 			for i := 1; i <= numSeriesToPush; i++ {
 				metricName := fmt.Sprintf("series_%d", i)
-				series, expectedVector := generateSeries(metricName, now)
+				series, expectedVector, _ := generateSeries(metricName, now)
 				res, err := client.Push(series)
 				require.NoError(t, err)
 				require.Equal(t, 200, res.StatusCode)
@@ -109,6 +119,7 @@ func TestIngesterSharding(t *testing.T) {
 				}
 			}
 
+			// Verify that the expected number of ingesters had series (write path).
 			require.Equal(t, testData.expectedIngestersWithSeries, numIngestersWithSeries)
 			require.Equal(t, numSeriesToPush, totalIngestedSeries)
 

@@ -16,8 +16,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/objstore"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/grafana/mimir/pkg/storage/bucket"
@@ -106,22 +105,22 @@ func (b *BucketValidationCommand) Register(app *kingpin.Application, _ EnvVarNam
 }
 
 func (b *BucketValidationCommand) validate(k *kingpin.ParseContext) error {
+	b.logger = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	if b.bucketConfigHelp {
-		b.printBucketConfigHelp()
+		b.printBucketConfigHelp(b.logger)
 		return nil
 	}
 
-	err := b.parseBucketConfig()
+	err := b.parseBucketConfig(b.logger)
 	if err != nil {
 		return errors.Wrap(err, "error when parsing bucket config")
 	}
 
 	b.setObjectNames()
 	b.objectContent = "testData"
-	b.logger = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	ctx := context.Background()
 
-	bucketClient, err := bucket.NewClient(ctx, b.cfg, "testClient", b.logger, prometheus.DefaultRegisterer)
+	bucketClient, err := bucket.NewClient(ctx, b.cfg, "testClient", b.logger, nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create the bucket client")
 	}
@@ -132,9 +131,20 @@ func (b *BucketValidationCommand) validate(k *kingpin.ParseContext) error {
 	}
 
 	for testRun := 0; testRun < b.testRuns; testRun++ {
-		err = b.createTestObjects(ctx)
+		// Initially create the objects with an empty string of content. They will be
+		// overwritten next with the expected content. This helps ensure that uploads
+		// can overwrite existing files and their contents reflect that.
+		err = b.uploadTestObjects(ctx, "", "creating test objects")
 		if err != nil {
 			return errors.Wrap(err, "error when uploading test data")
+		}
+
+		// Run the upload test again to verify that we can write to objects that
+		// already exist. Some object storage compatibility APIs don't actually let
+		// objects be overwritten via uploads if they already exist.
+		err = b.uploadTestObjects(ctx, b.objectContent, "overwriting test objects")
+		if err != nil {
+			return errors.Wrap(err, "error when overwriting test data")
 		}
 
 		err = b.validateTestObjects(ctx)
@@ -153,9 +163,9 @@ func (b *BucketValidationCommand) validate(k *kingpin.ParseContext) error {
 	return nil
 }
 
-func (b *BucketValidationCommand) printBucketConfigHelp() {
+func (b *BucketValidationCommand) printBucketConfigHelp(logger log.Logger) {
 	fs := flag.NewFlagSet("bucket-config", flag.ContinueOnError)
-	b.cfg.RegisterFlags(fs)
+	b.cfg.RegisterFlags(fs, logger)
 
 	fmt.Fprintf(fs.Output(), `
 The following help text describes the arguments
@@ -169,9 +179,9 @@ mimirtool bucket-validation --bucket-config='-backend=s3 -s3.endpoint=localhost:
 	fs.Usage()
 }
 
-func (b *BucketValidationCommand) parseBucketConfig() error {
+func (b *BucketValidationCommand) parseBucketConfig(logger log.Logger) error {
 	fs := flag.NewFlagSet("bucket-config", flag.ContinueOnError)
-	b.cfg.RegisterFlags(fs)
+	b.cfg.RegisterFlags(fs, logger)
 	err := fs.Parse(strings.Split(b.bucketConfig, " "))
 	if err != nil {
 		return err
@@ -193,14 +203,14 @@ func (b *BucketValidationCommand) setObjectNames() {
 	}
 }
 
-func (b *BucketValidationCommand) createTestObjects(ctx context.Context) error {
+func (b *BucketValidationCommand) uploadTestObjects(ctx context.Context, content string, phase string) error {
 	iteration := 0
 	for dirName, objectName := range b.objectNames {
-		b.report("creating test objects", iteration)
+		b.report(phase, iteration)
 		iteration++
 
 		objectPath := dirName + objectName
-		err := b.bucketClient.Upload(ctx, objectPath, strings.NewReader(b.objectContent))
+		err := b.bucketClient.Upload(ctx, objectPath, strings.NewReader(content))
 		if err != nil {
 			return errors.Wrapf(err, "failed to upload object (%s)", objectPath)
 		}
@@ -213,7 +223,7 @@ func (b *BucketValidationCommand) createTestObjects(ctx context.Context) error {
 			return errors.Errorf("Expected obj %s to exist, but it did not", objectPath)
 		}
 	}
-	b.report("creating test objects", iteration)
+	b.report(phase, iteration)
 
 	return nil
 }
@@ -254,6 +264,8 @@ func (b *BucketValidationCommand) validateTestObjects(ctx context.Context) error
 		if err != nil {
 			return errors.Wrapf(err, "failed to read object (%s)", objectPath)
 		}
+
+		_ = reader.Close()
 		if string(content) != b.objectContent {
 			return errors.Wrapf(err, "got invalid object content (%s)", objectPath)
 		}
@@ -304,7 +316,7 @@ func (b *BucketValidationCommand) deleteTestObjects(ctx context.Context) error {
 			return errors.Wrapf(err, "failed to list objects")
 		}
 		if foundDeletedDir {
-			return errors.Errorf("List returned directory which is supposed to be deleted.")
+			return errors.Errorf("list returned directory which is supposed to be deleted")
 		}
 		expectedDirCount := len(b.objectNames) - iteration
 		if foundDirCount != expectedDirCount {
