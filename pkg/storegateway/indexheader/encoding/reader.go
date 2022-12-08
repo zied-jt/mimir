@@ -138,10 +138,3 @@ func (f *FileReader) Size() int {
 func (f *FileReader) Len() int {
 	return f.length - f.pos
 }
-
-// close closes the underlying resources used by this FileReader. This method
-// is unexported to ensure that all resource management is handled by DecbufFactory
-// which pools resources.
-func (f *FileReader) close() error {
-	return f.file.Close()
-}

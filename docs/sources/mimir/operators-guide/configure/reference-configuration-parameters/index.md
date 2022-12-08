@@ -3021,6 +3021,11 @@ bucket_store:
     # CLI flag: -blocks-storage.bucket-store.index-header.stream-reader-enabled
     [stream_reader_enabled: <boolean> | default = false]
 
+    # (experimental) Max number of file handles the store-gateway will keep open
+    # for each index-header file when using the streaming reader.
+    # CLI flag: -blocks-storage.bucket-store.index-header.file-handle-pool-size
+    [file_handle_pool_size: <int> | default = 1]
+
   # (experimental) True to reject queries above the max number of concurrent
   # queries to execute against long-term storage. If false, queries will block
   # until they are able to run.
