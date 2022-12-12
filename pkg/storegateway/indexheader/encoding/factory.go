@@ -167,6 +167,7 @@ func (df *DecbufFactory) CloseWithErrCapture(err *error, d Decbuf, format string
 // on get. If the pool is full, the file handle is closed on put.
 type filePool struct {
 	path    string
+	mtx     sync.Mutex
 	handles chan *os.File
 }
 
@@ -185,10 +186,13 @@ func newFilePool(path string, cap uint) *filePool {
 // get returns a pooled file handle if available or opens a new one if there
 // are no pooled handles available.
 func (p *filePool) get() (*os.File, error) {
+	p.mtx.Lock()
 	select {
 	case f := <-p.handles:
+		p.mtx.Unlock()
 		return f, nil
 	default:
+		p.mtx.Unlock()
 		return os.Open(p.path)
 	}
 }
@@ -196,22 +200,26 @@ func (p *filePool) get() (*os.File, error) {
 // put returns a file handle to the pool if there is space available or closes
 // the file handle if there is not.
 func (p *filePool) put(f *os.File) error {
+	p.mtx.Lock()
 	select {
 	case p.handles <- f:
+		p.mtx.Unlock()
 		return nil
 	default:
+		p.mtx.Unlock()
 		return f.Close()
 	}
 }
 
 // stop closes all pooled file handles.
 func (p *filePool) stop() {
-	for {
-		select {
-		case f := <-p.handles:
-			_ = f.Close()
-		default:
-			return
-		}
+	p.mtx.Lock()
+	handles := p.handles
+	p.handles = nil
+	p.mtx.Unlock()
+
+	close(handles)
+	for f := range handles {
+		_ = f.Close()
 	}
 }
