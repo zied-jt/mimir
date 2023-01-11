@@ -137,12 +137,12 @@ func TestSlabPool(t *testing.T) {
 		delegatePool := &TrackedPool{Parent: &sync.Pool{}}
 		slabPool := NewSlabPool[byte](delegatePool, 10)
 
-		sliceA := slabPool.Get(5)
+		sliceA := *slabPool.Get(5)
 		require.Len(t, sliceA, 5)
 		require.Equal(t, 5, cap(sliceA))
 		copy(sliceA, "12345")
 
-		sliceB := slabPool.Get(5)
+		sliceB := *slabPool.Get(5)
 		require.Len(t, sliceB, 5)
 		require.Equal(t, 5, cap(sliceB))
 		copy(sliceB, "67890")
@@ -163,7 +163,7 @@ func TestSlabPool(t *testing.T) {
 		delegatePool := &TrackedPool{Parent: &sync.Pool{}}
 		slabPool := NewSlabPool[byte](delegatePool, 10)
 
-		sliceA := slabPool.Get(5)
+		sliceA := *slabPool.Get(5)
 		assert.Len(t, sliceA, 5)
 		assert.Equal(t, 5, cap(sliceA))
 		copy(sliceA, "12345")
@@ -173,7 +173,7 @@ func TestSlabPool(t *testing.T) {
 		require.Equal(t, 10, cap(*(slabPool.slabs[0])))
 
 		// Size doesn't fit the existing slab, so a new one will be created.
-		sliceB := slabPool.Get(6)
+		sliceB := *slabPool.Get(6)
 		assert.Len(t, sliceB, 6)
 		assert.Equal(t, 6, cap(sliceB))
 		copy(sliceB, "67890-")
@@ -185,7 +185,7 @@ func TestSlabPool(t *testing.T) {
 		require.Equal(t, 10, cap(*(slabPool.slabs[1])))
 
 		// Size fits in the last slab.
-		sliceC := slabPool.Get(3)
+		sliceC := *slabPool.Get(3)
 		assert.Len(t, sliceC, 3)
 		assert.Equal(t, 3, cap(sliceC))
 		copy(sliceC, "abc")
@@ -197,7 +197,7 @@ func TestSlabPool(t *testing.T) {
 		require.Equal(t, 10, cap(*(slabPool.slabs[1])))
 
 		// Size fits in the previous last slab.
-		sliceD := slabPool.Get(3)
+		sliceD := *slabPool.Get(3)
 		assert.Len(t, sliceD, 3)
 		assert.Equal(t, 3, cap(sliceD))
 		copy(sliceD, "def")
@@ -253,12 +253,12 @@ func TestSlabPool_Fuzzy(t *testing.T) {
 			_, err := rand.Read(expected)
 			require.NoError(t, err)
 
-			copy(slice, expected)
+			copy(*slice, expected)
 
 			// Keep track of it, so we can check no data was overwritten later on.
 			assertions = append(assertions, assertion{
 				expected: expected,
-				actual:   slice,
+				actual:   *slice,
 			})
 		}
 

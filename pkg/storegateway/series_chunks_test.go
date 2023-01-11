@@ -68,12 +68,12 @@ func TestSeriesChunksSet(t *testing.T) {
 
 				set.series[i].lset = labels.FromStrings(labels.MetricName, "metric")
 				set.series[i].refs = []chunks.ChunkRef{1, 2, 3}
-				set.series[i].chks = set.newSeriesAggrChunkSlice(numChunksPerSeries)
+				set.series[i].chks = *set.newSeriesAggrChunkSlice(numChunksPerSeries)
 			}
 
 			// Do the same with the chunks.
 			for i := 0; i < numSeries; i++ {
-				set.series[i].chks = set.newSeriesAggrChunkSlice(numChunksPerSeries)
+				set.series[i].chks = *set.newSeriesAggrChunkSlice(numChunksPerSeries)
 				for j := 0; j < numChunksPerSeries; j++ {
 					require.Equal(t, storepb.AggrChunk{}, set.series[i].chks[j])
 
@@ -96,12 +96,12 @@ func TestSeriesChunksSet(t *testing.T) {
 
 		set := newSeriesChunksSet(1, true)
 
-		slice := set.newSeriesAggrChunkSlice(seriesChunksSlabSize - 1)
+		slice := *set.newSeriesAggrChunkSlice(seriesChunksSlabSize - 1)
 		assert.Equal(t, seriesChunksSlabSize-1, len(slice))
 		assert.Equal(t, seriesChunksSlabSize-1, cap(slice))
 		assert.Equal(t, 1, int(seriesChunksSlicePool.(*pool.TrackedPool).Gets.Load()))
 
-		slice = set.newSeriesAggrChunkSlice(seriesChunksSlabSize)
+		slice = *set.newSeriesAggrChunkSlice(seriesChunksSlabSize)
 		assert.Equal(t, seriesChunksSlabSize, len(slice))
 		assert.Equal(t, seriesChunksSlabSize, cap(slice))
 		assert.Equal(t, 2, int(seriesChunksSlicePool.(*pool.TrackedPool).Gets.Load()))
@@ -115,7 +115,7 @@ func TestSeriesChunksSet(t *testing.T) {
 
 		set := newSeriesChunksSet(1, false)
 
-		slice := set.newSeriesAggrChunkSlice(seriesChunksSlabSize)
+		slice := *set.newSeriesAggrChunkSlice(seriesChunksSlabSize)
 		assert.Equal(t, seriesChunksSlabSize, len(slice))
 		assert.Equal(t, seriesChunksSlabSize, cap(slice))
 		assert.Equal(t, 0, int(seriesChunksSlicePool.(*pool.TrackedPool).Gets.Load()))
@@ -754,8 +754,8 @@ func (f *chunkReaderMock) load(result []seriesEntry, chunksPool *pool.SafeSlabPo
 		// Take bytes from the pool, so we can assert on number of allocations and that frees are happening
 		chunkData := f.chunks[chunkRef].Raw.Data
 		copiedChunkData := chunksPool.Get(len(chunkData))
-		copy(copiedChunkData, chunkData)
-		result[indices.seriesEntry].chks[indices.chunk].Raw = &storepb.Chunk{Data: copiedChunkData}
+		copy(*copiedChunkData, chunkData)
+		result[indices.seriesEntry].chks[indices.chunk].Raw = &storepb.Chunk{Data: *copiedChunkData}
 	}
 	return nil
 }

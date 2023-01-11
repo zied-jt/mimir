@@ -139,9 +139,10 @@ func (b *seriesChunksSet) release() {
 // newSeriesAggrChunkSlice returns a []storepb.AggrChunk guaranteed to have length and capacity
 // equal to the provided size. The returned slice may be picked from a memory pool and then released
 // back once release() gets invoked.
-func (b *seriesChunksSet) newSeriesAggrChunkSlice(size int) []storepb.AggrChunk {
+func (b *seriesChunksSet) newSeriesAggrChunkSlice(size int) *[]storepb.AggrChunk {
 	if !b.seriesReleasable {
-		return make([]storepb.AggrChunk, size)
+		chunks := make([]storepb.AggrChunk, size)
+		return &chunks
 	}
 
 	// Lazy initialise the pool.
@@ -339,7 +340,7 @@ func (c *loadingSeriesChunksSetIterator) Next() (retHasNext bool) {
 
 	for i, s := range nextUnloaded.series {
 		nextSet.series[i].lset = s.lset
-		nextSet.series[i].chks = nextSet.newSeriesAggrChunkSlice(len(s.chunks))
+		nextSet.series[i].chks = *nextSet.newSeriesAggrChunkSlice(len(s.chunks))
 
 		for j, chunk := range s.chunks {
 			nextSet.series[i].chks[j].MinTime = chunk.minTime

@@ -170,7 +170,7 @@ func (b *SlabPool[T]) Release() {
 }
 
 // Get returns a slice of T with the given length and capacity (both matches).
-func (b *SlabPool[T]) Get(size int) []T {
+func (b *SlabPool[T]) Get(size int) *[]T {
 	const lookback = 3
 
 	if size <= 0 {
@@ -180,7 +180,8 @@ func (b *SlabPool[T]) Get(size int) []T {
 	// If the requested size is bigger than the slab size, then the slice
 	// can't be handled by this pool and will be allocated outside it.
 	if size > b.slabSize {
-		return make([]T, size)
+		s := make([]T, size)
+		return &s
 	}
 
 	var slab *[]T
@@ -207,9 +208,11 @@ func (b *SlabPool[T]) Get(size int) []T {
 		b.slabs = append(b.slabs, slab)
 	}
 
-	// Resize the slab length and return a sub-slice.
+	// Resize the slab length to include the requested size
 	*slab = (*slab)[:len(*slab)+size]
-	return (*slab)[len(*slab)-size : len(*slab) : len(*slab)]
+	// Create a subslice of the slab with length and capacity of size
+	resized := (*slab)[len(*slab)-size : len(*slab) : len(*slab)]
+	return &resized
 }
 
 // SafeSlabPool wraps SlabPool to make it safe for concurrent use from multiple goroutines
@@ -231,7 +234,7 @@ func (b *SafeSlabPool[T]) Release() {
 	b.wrapped.Release()
 }
 
-func (b *SafeSlabPool[T]) Get(size int) []T {
+func (b *SafeSlabPool[T]) Get(size int) *[]T {
 	b.wrappedMx.Lock()
 	defer b.wrappedMx.Unlock()
 
