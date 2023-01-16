@@ -215,6 +215,10 @@ func (b *SlabPool[T]) Get(size int) *[]T {
 	return &resized
 }
 
+func (b *SlabPool[T]) Put(_ *[]T) {
+	// no-op, all allocations are released together
+}
+
 // SafeSlabPool wraps SlabPool to make it safe for concurrent use from multiple goroutines
 type SafeSlabPool[T any] struct {
 	wrappedMx sync.Mutex
@@ -239,4 +243,8 @@ func (b *SafeSlabPool[T]) Get(size int) *[]T {
 	defer b.wrappedMx.Unlock()
 
 	return b.wrapped.Get(size)
+}
+
+func (b *SafeSlabPool[T]) Put(_ *[]T) {
+	// no-op, all allocations are released together
 }

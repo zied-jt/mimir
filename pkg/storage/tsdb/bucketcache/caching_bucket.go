@@ -49,6 +49,33 @@ type CachingBucket struct {
 	operationHits     *prometheus.CounterVec
 }
 
+type cachingAllocatorBucket struct {
+	*CachingBucket
+
+	allocator cache.Allocator
+}
+
+func (cab *cachingAllocatorBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	return cab.CachingBucket.get(ctx, name, cache.WithAllocator(cab.allocator))
+}
+
+func (cab *cachingAllocatorBucket) GetRange(ctx context.Context, name string, off, length int64) (io.ReadCloser, error) {
+	return cab.CachingBucket.getRange(ctx, name, off, length, cache.WithAllocator(cab.allocator))
+}
+
+func WithAllocator(bucket objstore.BucketReader, alloc cache.Allocator) objstore.BucketReader {
+	if alloc == nil {
+		return bucket
+	}
+
+	caching, ok := bucket.(*CachingBucket)
+	if !ok {
+		return bucket
+	}
+
+	return &cachingAllocatorBucket{caching, alloc}
+}
+
 // NewCachingBucket creates new caching bucket with provided configuration. Configuration should not be
 // changed after creating caching bucket.
 func NewCachingBucket(b objstore.Bucket, cfg *CachingBucketConfig, logger log.Logger, reg prometheus.Registerer) (*CachingBucket, error) {
@@ -211,6 +238,10 @@ func storeExistsCacheEntry(ctx context.Context, cachingKey string, exists bool, 
 }
 
 func (cb *CachingBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	return cb.get(ctx, name)
+}
+
+func (cb *CachingBucket) get(ctx context.Context, name string, opts ...cache.Option) (io.ReadCloser, error) {
 	cfgName, cfg := cb.cfg.findGetConfig(name)
 	if cfg == nil {
 		return cb.Bucket.Get(ctx, name)
@@ -221,7 +252,7 @@ func (cb *CachingBucket) Get(ctx context.Context, name string) (io.ReadCloser, e
 	contentKey := cachingKeyContent(name)
 	existsKey := cachingKeyExists(name)
 
-	hits := cfg.cache.Fetch(ctx, []string{contentKey, existsKey})
+	hits := cfg.cache.Fetch(ctx, []string{contentKey, existsKey}, opts...)
 	if hits[contentKey] != nil {
 		cb.operationHits.WithLabelValues(objstore.OpGet, cfgName).Inc()
 		return objstore.NopCloserWithSize(bytes.NewBuffer(hits[contentKey])), nil
@@ -264,6 +295,10 @@ func (cb *CachingBucket) IsObjNotFoundErr(err error) bool {
 }
 
 func (cb *CachingBucket) GetRange(ctx context.Context, name string, off, length int64) (io.ReadCloser, error) {
+	return cb.getRange(ctx, name, off, length)
+}
+
+func (cb *CachingBucket) getRange(ctx context.Context, name string, off, length int64, opts ...cache.Option) (io.ReadCloser, error) {
 	if off < 0 || length <= 0 {
 		return cb.Bucket.GetRange(ctx, name, off, length)
 	}
@@ -273,7 +308,7 @@ func (cb *CachingBucket) GetRange(ctx context.Context, name string, off, length 
 		return cb.Bucket.GetRange(ctx, name, off, length)
 	}
 
-	return cb.cachedGetRange(ctx, name, off, length, cfgName, cfg)
+	return cb.cachedGetRange(ctx, name, off, length, cfgName, cfg, opts...)
 }
 
 func (cb *CachingBucket) Attributes(ctx context.Context, name string) (objstore.ObjectAttributes, error) {
@@ -316,7 +351,7 @@ func (cb *CachingBucket) cachedAttributes(ctx context.Context, name, cfgName str
 	return attrs, nil
 }
 
-func (cb *CachingBucket) cachedGetRange(ctx context.Context, name string, offset, length int64, cfgName string, cfg *getRangeConfig) (io.ReadCloser, error) {
+func (cb *CachingBucket) cachedGetRange(ctx context.Context, name string, offset, length int64, cfgName string, cfg *getRangeConfig, opts ...cache.Option) (io.ReadCloser, error) {
 	cb.operationRequests.WithLabelValues(objstore.OpGetRange, cfgName).Inc()
 	cb.requestedGetRangeBytes.WithLabelValues(cfgName).Add(float64(length))
 
@@ -365,7 +400,7 @@ func (cb *CachingBucket) cachedGetRange(ctx context.Context, name string, offset
 
 	// Try to get all subranges from the cache.
 	totalCachedBytes := int64(0)
-	hits := cfg.cache.Fetch(ctx, keys)
+	hits := cfg.cache.Fetch(ctx, keys, opts...)
 	for _, b := range hits {
 		totalCachedBytes += int64(len(b))
 	}

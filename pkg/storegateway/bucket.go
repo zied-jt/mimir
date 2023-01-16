@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+
 	"io"
 	"math"
 	"os"
@@ -44,6 +45,7 @@ import (
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/storage/sharding"
 	"github.com/grafana/mimir/pkg/storage/tsdb/block"
+	"github.com/grafana/mimir/pkg/storage/tsdb/bucketcache"
 	"github.com/grafana/mimir/pkg/storage/tsdb/metadata"
 	"github.com/grafana/mimir/pkg/storegateway/hintspb"
 	"github.com/grafana/mimir/pkg/storegateway/indexcache"
@@ -1794,12 +1796,12 @@ func (b *bucketBlock) readChunkRange(ctx context.Context, seq int, off, length i
 	return chunkBuffer, nil
 }
 
-func (b *bucketBlock) chunkRangeReader(ctx context.Context, seq int, off, length int64) (io.ReadCloser, error) {
+func (b *bucketBlock) chunkRangeReader(ctx context.Context, seq int, off, length int64, chunksPool *pool.SafeSlabPool[byte]) (io.ReadCloser, error) {
 	if seq < 0 || seq >= len(b.chunkObjs) {
 		return nil, errors.Errorf("unknown segment file for index %d", seq)
 	}
 
-	return b.bkt.GetRange(ctx, b.chunkObjs[seq], off, length)
+	return bucketcache.WithAllocator(b.bkt, chunksPool).GetRange(ctx, b.chunkObjs[seq], off, length)
 }
 
 func (b *bucketBlock) indexReader() *bucketIndexReader {

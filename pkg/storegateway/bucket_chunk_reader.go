@@ -101,7 +101,7 @@ func (r *bucketChunkReader) loadChunks(ctx context.Context, res []seriesEntry, s
 	fetchBegin := time.Now()
 
 	// Get a reader for the required range.
-	reader, err := r.block.chunkRangeReader(ctx, seq, int64(part.Start), int64(part.End-part.Start))
+	reader, err := r.block.chunkRangeReader(ctx, seq, int64(part.Start), int64(part.End-part.Start), chunksPool)
 	if err != nil {
 		return errors.Wrap(err, "get range reader")
 	}
