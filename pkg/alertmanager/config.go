@@ -1,6 +1,9 @@
 package alertmanager
 
 import (
+	"net/url"
+	"path/filepath"
+
 	gklog "github.com/go-kit/log"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/notify"
@@ -11,9 +14,8 @@ import (
 
 // TODO working name... 100% change it
 type UserConfigWrapper interface {
-	Templates() []string
 	InhibitRules() []config.InhibitRule
-	BuildIntegrationsMap(tmpl *template.Template, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error)
+	BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error)
 	TimeIntervals() map[string][]timeinterval.TimeInterval
 	Route() *config.Route
 
@@ -40,15 +42,15 @@ func (m MimirWrapper) Route() *config.Route {
 	return m.conf.Route
 }
 
-func (m MimirWrapper) Templates() []string {
-	return m.conf.Templates
-}
-
 func (m MimirWrapper) InhibitRules() []config.InhibitRule {
 	return m.conf.InhibitRules
 }
 
-func (m MimirWrapper) BuildIntegrationsMap(tmpl *template.Template, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error) {
+func (m MimirWrapper) BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error) {
+	tmpl, err := buildTemplates(userID, filepath.Join(tenantDir, templatesDir), externalURL, m.conf.Templates)
+	if err != nil {
+		return nil, err
+	}
 	return buildIntegrationsMap(m.conf.Receivers, tmpl, httpOps, logger, notifierWrapper)
 }
 
@@ -62,4 +64,22 @@ func (m MimirWrapper) TimeIntervals() map[string][]timeinterval.TimeInterval {
 		timeIntervals[ti.Name] = ti.TimeIntervals
 	}
 	return timeIntervals
+}
+
+func buildTemplates(userID string, dir string, externalURL *url.URL, templates []string) (*template.Template, error) {
+	templateFiles := make([]string, len(templates))
+	for i, t := range templates {
+		templateFilepath, err := safeTemplateFilepath(dir, t)
+		if err != nil {
+			return nil, err
+		}
+		templateFiles[i] = templateFilepath
+	}
+	tmpl, err := template.FromGlobs(templateFiles, withCustomFunctions(userID))
+
+	if err != nil {
+		return nil, err
+	}
+	tmpl.ExternalURL = externalURL
+	return tmpl, nil
 }

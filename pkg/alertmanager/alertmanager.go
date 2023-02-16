@@ -288,7 +288,7 @@ func New(cfg *Config, reg *prometheus.Registry) (*Alertmanager, error) {
 
 	am.dispatcherMetrics = dispatch.NewDispatcherMetrics(true, am.registry)
 
-	//TODO: From this point onward, the alertmanager _might_ receive requests - we need to make sure we've settled and are ready.
+	// TODO: From this point onward, the alertmanager _might_ receive requests - we need to make sure we've settled and are ready.
 	return am, nil
 }
 
@@ -309,22 +309,6 @@ func clusterWait(position func() int, timeout time.Duration) func() time.Duratio
 
 // ApplyConfig applies a new configuration to an Alertmanager.
 func (am *Alertmanager) ApplyConfig(userID string, conf UserConfigWrapper, rawCfg string) error {
-	templates := conf.Templates()
-	templateFiles := make([]string, len(templates))
-	for i, t := range templates {
-		templateFilepath, err := safeTemplateFilepath(filepath.Join(am.cfg.TenantDataDir, templatesDir), t)
-		if err != nil {
-			return err
-		}
-
-		templateFiles[i] = templateFilepath
-	}
-
-	tmpl, err := template.FromGlobs(templateFiles, withCustomFunctions(userID))
-	if err != nil {
-		return err
-	}
-	tmpl.ExternalURL = am.cfg.ExternalURL
 
 	am.api.Update(conf.Raw(), func(_ model.LabelSet) {})
 
@@ -357,7 +341,7 @@ func (am *Alertmanager) ApplyConfig(userID string, conf UserConfigWrapper, rawCf
 		commoncfg.WithDialContextFunc(firewallDialer.DialContext),
 	}
 
-	integrationsMap, err := conf.BuildIntegrationsMap(tmpl, httpOps, am.logger, func(integrationName string, notifier notify.Notifier) notify.Notifier {
+	integrationsMap, err := conf.BuildIntegrationsMap(userID, am.cfg.TenantDataDir, am.cfg.ExternalURL, httpOps, am.logger, func(integrationName string, notifier notify.Notifier) notify.Notifier {
 		if am.cfg.Limits != nil {
 			rl := &tenantRateLimits{
 				tenant:      userID,
