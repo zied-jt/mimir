@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +27,94 @@ const (
 	grafanaTemplatesDir = "temlates_grafana"
 )
 
+type GrafanaConfig struct {
+	Templates []string           `yaml:"grafana_templates,omitempty"`
+	Receivers []GrafanaReceivers `yaml:"receivers,omitempty" json:"receivers,omitempty"`
+}
+
+type GrafanaReceivers struct {
+	// A unique identifier for this receiver.
+	Name      string             `yaml:"name" json:"name"`
+	Receivers []*GrafanaReceiver `yaml:"grafana_managed_receiver_configs,omitempty" json:"grafana_managed_receiver_configs,omitempty"`
+}
+
+func (g GrafanaReceivers) ToApiReceiver() *notify2.APIReceiver {
+	recv := make([]*notify2.GrafanaReceiver, 0, len(g.Receivers))
+	for _, receiver := range g.Receivers {
+		recv = append(recv, &notify2.GrafanaReceiver{
+			UID:                   receiver.UID,
+			Name:                  receiver.Name,
+			Type:                  receiver.Type,
+			DisableResolveMessage: receiver.DisableResolveMessage,
+			Settings:              json.RawMessage(receiver.Settings),
+			SecureSettings:        nil,
+		})
+	}
+	if len(recv) == 0 {
+		return nil
+	}
+	return &notify2.APIReceiver{
+		ConfigReceiver: config.Receiver{Name: g.Name},
+		GrafanaReceivers: notify2.GrafanaReceivers{
+			Receivers: recv,
+		},
+	}
+}
+
+type GrafanaReceiver struct {
+	UID                   string     `yaml:"uid"`
+	Name                  string     `yaml:"name"`
+	Type                  string     `yaml:"type"`
+	DisableResolveMessage bool       `yaml:"disableResolveMessage"`
+	Settings              RawMessage `yaml:"settings"` // TODO figure something out... this is a terrible hack
+}
+
+type RawMessage json.RawMessage // This type alias adds YAML marshaling to the json.RawMessage.
+
+// MarshalJSON returns m as the JSON encoding of m.
+func (r RawMessage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(json.RawMessage(r))
+}
+
+func (r *RawMessage) UnmarshalJSON(data []byte) error {
+	var raw json.RawMessage
+	err := json.Unmarshal(data, &raw)
+	if err != nil {
+		return err
+	}
+	*r = RawMessage(raw)
+	return nil
+}
+
+func (r *RawMessage) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var data interface{}
+	if err := unmarshal(&data); err != nil {
+		return err
+	}
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	*r = bytes
+	return nil
+}
+
+func (r RawMessage) MarshalYAML() (interface{}, error) {
+	if r == nil {
+		return nil, nil
+	}
+	var d interface{}
+	err := json.Unmarshal(r, &d)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
 type GrafanaWrapper struct {
 	*MimirWrapper
 	grafanaTemplates []string
-	receiverConfigs  []*notify2.GrafanaReceiverTyped
+	receiverConfigs  []notify2.GrafanaReceiverTyped
 }
 
 func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOpts []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error) {
@@ -195,8 +280,9 @@ type emailSender struct {
 	hello     string
 }
 
-func (n emailSender) SendEmail(ctx context.Context, cmd *receivers.SendEmailSettings) error {
-	return errors.New("NOT IMPLEMENETED YET!") // TODO do something with it
+func (n emailSender) SendEmail(ctx context.Context, cmd *receivers.SendEmailSettings) (bool, error) {
+	// TODO here we will need to render another template the same way Grafana does
+	return false, errors.New("NOT IMPLEMENETED YET!") // TODO do something with it
 	/*
 		var (
 			c       *smtp.Client

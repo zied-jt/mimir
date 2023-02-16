@@ -657,6 +657,7 @@ func (am *MultitenantAlertmanager) setConfig(cfg alertspb.AlertConfigDesc) error
 	var err error
 	var hasTemplateChanges bool
 	var userTemplateDir = filepath.Join(am.getTenantDirectory(cfg.User), templatesDir)
+	var userGrafanaTemplateDir = filepath.Join(am.getTenantDirectory(cfg.User), grafanaTemplatesDir)
 	var pathsToRemove = make(map[string]struct{})
 
 	// List existing files to keep track of the ones to be removed
@@ -670,8 +671,39 @@ func (am *MultitenantAlertmanager) setConfig(cfg alertspb.AlertConfigDesc) error
 		}
 	}
 
+	// TODO DEDUP code
+	// List existing files to keep track of the ones to be removed
+	if oldTemplateFiles, err := os.ReadDir(userGrafanaTemplateDir); err == nil {
+		for _, file := range oldTemplateFiles {
+			templateFilePath, err := safeTemplateFilepath(userGrafanaTemplateDir, file.Name())
+			if err != nil {
+				return err
+			}
+			pathsToRemove[templateFilePath] = struct{}{}
+		}
+	}
+
 	for _, tmpl := range cfg.Templates {
 		templateFilePath, err := safeTemplateFilepath(userTemplateDir, tmpl.Filename)
+		if err != nil {
+			return err
+		}
+
+		// Removing from pathsToRemove map the files that still exists in the config
+		delete(pathsToRemove, templateFilePath)
+		hasChanged, err := storeTemplateFile(templateFilePath, tmpl.Body)
+		if err != nil {
+			return err
+		}
+
+		if hasChanged {
+			hasTemplateChanges = true
+		}
+	}
+
+	// TODO There are two places where it is done. One here and one in Alertmanager (Wrapper config). Remove one?
+	for _, tmpl := range cfg.GrafanaTemplates {
+		templateFilePath, err := safeTemplateFilepath(userGrafanaTemplateDir, tmpl.Filename)
 		if err != nil {
 			return err
 		}
