@@ -31,10 +31,10 @@ import (
 )
 
 func BuildReceiverIntegrations(
-	receiver *GrafanaReceiverTyped,
+	receiver GrafanaReceiverTyped,
 	tmpl *template.Template,
-	ns func(n receivers.NotifierInfo) (receivers.WebhookSender, error),
-	es func(n receivers.NotifierInfo) (receivers.EmailSender, error),
+	createWebhookSender func(n receivers.NotifierInfo) (receivers.WebhookSender, error),
+	createEmailSender func(n receivers.NotifierInfo) (receivers.EmailSender, error),
 	img images.ImageStore, // Used by some receivers to include as part of the source
 	logFactory logging.LoggerFactory,
 
@@ -64,7 +64,7 @@ func BuildReceiverIntegrations(
 		if err != nil { // if there is at least one error, just skip all remaining calls. this is to simplify the logic below
 			return
 		}
-		w, e := ns(cfg)
+		w, e := createWebhookSender(cfg)
 		if e != nil {
 			err = fmt.Errorf("unable to build webhook client for %s notifier %s (UID: %s): %w ", cfg.Type, cfg.Name, cfg.UID, e)
 		}
@@ -89,7 +89,7 @@ func BuildReceiverIntegrations(
 		})
 	}
 	for i, cfg := range receiver.EmailConfigs {
-		mailCli, e := es(cfg.NotifierInfo)
+		mailCli, e := createEmailSender(cfg.NotifierInfo)
 		if e != nil {
 			err = fmt.Errorf("unable to build webhook client for %s notifier %s (UID: %s): %w ", cfg.Type, cfg.Name, cfg.UID, e)
 			break

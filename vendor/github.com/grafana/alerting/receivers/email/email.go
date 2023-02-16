@@ -99,11 +99,7 @@ func (en *Notifier) Notify(ctx context.Context, alerts ...*types.Alert) (bool, e
 		en.log.Warn("failed to template email message", "error", tmplErr.Error())
 	}
 
-	if err := en.ns.SendEmail(ctx, cmd); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return en.ns.SendEmail(ctx, cmd)
 }
 
 func (en *Notifier) SendResolved() bool {

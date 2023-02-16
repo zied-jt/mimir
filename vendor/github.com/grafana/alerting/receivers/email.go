@@ -22,5 +22,7 @@ type SendEmailAttachFile struct {
 }
 
 type EmailSender interface {
-	SendEmail(ctx context.Context, cmd *SendEmailSettings) error
+	// SendEmail sends an email. It returns an error if unsuccessful and a flag whether the error is
+	// recoverable. This information is useful for a retry logic.
+	SendEmail(ctx context.Context, cmd *SendEmailSettings) (bool, error)
 }
