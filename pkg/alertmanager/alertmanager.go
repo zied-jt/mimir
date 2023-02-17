@@ -309,9 +309,6 @@ func clusterWait(position func() int, timeout time.Duration) func() time.Duratio
 
 // ApplyConfig applies a new configuration to an Alertmanager.
 func (am *Alertmanager) ApplyConfig(userID string, conf UserConfigWrapper, rawCfg string) error {
-
-	am.api.Update(conf.Raw(), nil, func(_ model.LabelSet) {}) // TODO provide receivers to API
-
 	// Ensure inhibitor is set before being called
 	if am.inhibitor != nil {
 		am.inhibitor.Stop()
@@ -356,6 +353,8 @@ func (am *Alertmanager) ApplyConfig(userID string, conf UserConfigWrapper, rawCf
 	if err != nil {
 		return err
 	}
+
+	am.api.Update(conf.Raw(), integrationsMap, func(_ model.LabelSet) {}) // TODO provide receivers to API
 
 	pipeline := am.pipelineBuilder.New(
 		integrationsMap,
