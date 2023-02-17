@@ -192,83 +192,99 @@ func validateUserConfig(logger log.Logger, cfg alertspb.AlertConfigDesc, limits 
 		return fmt.Errorf("configuration provided is empty, if you'd like to remove your configuration please use the delete configuration endpoint")
 	}
 
-	amCfg, err := config.Load(cfg.RawConfig)
+	amCfg, err := LoadConfig(cfg.RawConfig)
 	if err != nil {
 		return err
 	}
 
 	// Validate the config recursively scanning it.
-	if err := validateAlertmanagerConfig(amCfg); err != nil {
+	if err := validateAlertmanagerConfig(amCfg.Raw()); err != nil {
 		return err
 	}
 
-	// Validate templates referenced in the alertmanager config.
-	for _, name := range amCfg.Templates {
-		if err := validateTemplateFilename(name); err != nil {
-			return err
-		}
-	}
-
-	// Check template limits.
-	if l := limits.AlertmanagerMaxTemplatesCount(user); l > 0 && len(cfg.Templates) > l {
-		return fmt.Errorf(errTooManyTemplates, len(cfg.Templates), l)
-	}
-
-	if maxSize := limits.AlertmanagerMaxTemplateSize(user); maxSize > 0 {
-		for _, tmpl := range cfg.Templates {
-			if size := len(tmpl.GetBody()); size > maxSize {
-				return fmt.Errorf(errTemplateTooBig, tmpl.GetFilename(), size, maxSize)
+	validate := func(templates []string, templatesContent []*alertspb.TemplateDesc) error {
+		// Validate templates referenced in the alertmanager config.
+		for _, name := range templates {
+			if err := validateTemplateFilename(name); err != nil {
+				return err
 			}
 		}
-	}
 
-	// Validate template files.
-	for _, tmpl := range cfg.Templates {
-		if err := validateTemplateFilename(tmpl.Filename); err != nil {
-			return err
+		// Check template limits.
+		if l := limits.AlertmanagerMaxTemplatesCount(user); l > 0 && len(cfg.Templates) > l {
+			return fmt.Errorf(errTooManyTemplates, len(cfg.Templates), l)
 		}
-	}
 
-	// Create templates on disk in a temporary directory.
-	// Note: This means the validation will succeed if we can write to tmp but
-	// not to configured data dir, and on the flipside, it'll fail if we can't write
-	// to tmpDir. Ignoring both cases for now as they're ultra rare but will revisit if
-	// we see this in the wild.
-	userTempDir, err := os.MkdirTemp("", "validate-config-"+cfg.User)
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(userTempDir)
+		if maxSize := limits.AlertmanagerMaxTemplateSize(user); maxSize > 0 {
+			for _, tmpl := range cfg.Templates {
+				if size := len(tmpl.GetBody()); size > maxSize {
+					return fmt.Errorf(errTemplateTooBig, tmpl.GetFilename(), size, maxSize)
+				}
+			}
+		}
 
-	for _, tmpl := range cfg.Templates {
-		templateFilepath, err := safeTemplateFilepath(userTempDir, tmpl.Filename)
+		// Validate template files.
+		for _, tmpl := range cfg.Templates {
+			if err := validateTemplateFilename(tmpl.Filename); err != nil {
+				return err
+			}
+		}
+
+		// Create templates on disk in a temporary directory.
+		// Note: This means the validation will succeed if we can write to tmp but
+		// not to configured data dir, and on the flipside, it'll fail if we can't write
+		// to tmpDir. Ignoring both cases for now as they're ultra rare but will revisit if
+		// we see this in the wild.
+		userTempDir, err := os.MkdirTemp("", "validate-config-"+cfg.User)
 		if err != nil {
-			level.Error(logger).Log("msg", "unable to create template file path", "err", err, "user", cfg.User)
+			return err
+		}
+		defer os.RemoveAll(userTempDir)
+
+		for _, tmpl := range templatesContent {
+			templateFilepath, err := safeTemplateFilepath(userTempDir, tmpl.Filename)
+			if err != nil {
+				level.Error(logger).Log("msg", "unable to create template file path", "err", err, "user", cfg.User)
+				return err
+			}
+
+			if _, err = storeTemplateFile(templateFilepath, tmpl.Body); err != nil {
+				level.Error(logger).Log("msg", "unable to store template file", "err", err, "user", cfg.User)
+				return fmt.Errorf("unable to store template file '%s'", tmpl.Filename)
+			}
+		}
+
+		templateFiles := make([]string, len(templates))
+		for i, t := range templates {
+			templateFiles[i] = filepath.Join(userTempDir, t)
+		}
+
+		_, err = template.FromGlobs(templateFiles, withCustomFunctions(user))
+		if err != nil {
 			return err
 		}
 
-		if _, err = storeTemplateFile(templateFilepath, tmpl.Body); err != nil {
-			level.Error(logger).Log("msg", "unable to store template file", "err", err, "user", cfg.User)
-			return fmt.Errorf("unable to store template file '%s'", tmpl.Filename)
+		// Note: Not validating the MultitenantAlertmanager.transformConfig function as that
+		// that function shouldn't break configuration. Only way it can fail is if the base
+		// autoWebhookURL itself is broken. In that case, I would argue, we should accept the config
+		// not reject it.
+
+		return nil
+	}
+
+	// TODO this can be moved inside Load amcfg.Validate(cfg)
+	switch c := amCfg.(type) {
+	case *MimirWrapper:
+		return validate(c.conf.Templates, cfg.Templates)
+	case *GrafanaWrapper:
+		err = validate(c.conf.Templates, cfg.Templates)
+		if err != nil {
+			return err
 		}
+		return validate(c.grafanaTemplates, cfg.GrafanaTemplates)
+	default:
+		return errors.Errorf("unknown configuration type %T", c)
 	}
-
-	templateFiles := make([]string, len(amCfg.Templates))
-	for i, t := range amCfg.Templates {
-		templateFiles[i] = filepath.Join(userTempDir, t)
-	}
-
-	_, err = template.FromGlobs(templateFiles, withCustomFunctions(user))
-	if err != nil {
-		return err
-	}
-
-	// Note: Not validating the MultitenantAlertmanager.transformConfig function as that
-	// that function shouldn't break configuration. Only way it can fail is if the base
-	// autoWebhookURL itself is broken. In that case, I would argue, we should accept the config
-	// not reject it.
-
-	return nil
 }
 
 func (am *MultitenantAlertmanager) ListAllConfigs(w http.ResponseWriter, r *http.Request) {
