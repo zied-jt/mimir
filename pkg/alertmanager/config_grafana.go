@@ -143,7 +143,7 @@ func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, ex
 		integrationMap[integration.Name()] = integration
 	}
 
-	grafanaTmpl, err := buildTemplates(userID, filepath.Join(tenantDir, grafanaTemplatesDir), externalURL, g.grafanaTemplates)
+	grafanaTmpl, err := buildTemplates(userID, filepath.Join(tenantDir, grafanaTemplatesDir), externalURL, append(g.grafanaTemplates, "__default__.tmpl"))
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,8 @@ func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, ex
 			if err != nil {
 				return nil, err
 			}
-			return &webhookSender{c: client}, nil
+			// TODO create logger with notifier info in the context
+			return &webhookSender{c: client, l: logger}, nil
 		}
 
 		emailCli := func(info receivers.NotifierInfo) (receivers.EmailSender, error) {
