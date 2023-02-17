@@ -354,7 +354,7 @@ func (am *Alertmanager) ApplyConfig(userID string, conf UserConfigWrapper, rawCf
 		return notifier
 	})
 	if err != nil {
-		return nil
+		return err
 	}
 
 	pipeline := am.pipelineBuilder.New(
