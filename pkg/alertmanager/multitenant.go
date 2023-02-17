@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/alerting/templates"
 	"github.com/grafana/dskit/concurrency"
 	"github.com/grafana/dskit/flagext"
 	"github.com/grafana/dskit/kv"
@@ -655,78 +656,61 @@ func (am *MultitenantAlertmanager) syncConfigs(cfgs map[string]alertspb.AlertCon
 func (am *MultitenantAlertmanager) setConfig(cfg alertspb.AlertConfigDesc) error {
 	var userAmConfig UserConfigWrapper
 	var err error
-	var hasTemplateChanges bool
+	var hasTemplateChanges, hasGrafanaTemplateChanges bool
 	var userTemplateDir = filepath.Join(am.getTenantDirectory(cfg.User), templatesDir)
 	var userGrafanaTemplateDir = filepath.Join(am.getTenantDirectory(cfg.User), grafanaTemplatesDir)
-	var pathsToRemove = make(map[string]struct{})
 
-	// List existing files to keep track of the ones to be removed
-	if oldTemplateFiles, err := os.ReadDir(userTemplateDir); err == nil {
-		for _, file := range oldTemplateFiles {
-			templateFilePath, err := safeTemplateFilepath(userTemplateDir, file.Name())
-			if err != nil {
-				return err
+	updateTemplates := func(path string, templates []*alertspb.TemplateDesc) (bool, error) {
+		var hasChanges bool
+		var pathsToRemove = make(map[string]struct{})
+		// List existing files to keep track of the ones to be removed
+		if oldTemplateFiles, err := os.ReadDir(path); err == nil {
+			for _, file := range oldTemplateFiles {
+				templateFilePath, err := safeTemplateFilepath(path, file.Name())
+				if err != nil {
+					return false, err
+				}
+				pathsToRemove[templateFilePath] = struct{}{}
 			}
-			pathsToRemove[templateFilePath] = struct{}{}
 		}
-	}
 
-	// TODO DEDUP code
-	// List existing files to keep track of the ones to be removed
-	if oldTemplateFiles, err := os.ReadDir(userGrafanaTemplateDir); err == nil {
-		for _, file := range oldTemplateFiles {
-			templateFilePath, err := safeTemplateFilepath(userGrafanaTemplateDir, file.Name())
+		for _, tmpl := range templates {
+			templateFilePath, err := safeTemplateFilepath(path, tmpl.Filename)
 			if err != nil {
-				return err
+				return false, err
 			}
-			pathsToRemove[templateFilePath] = struct{}{}
+
+			// Removing from pathsToRemove map the files that still exists in the config
+			delete(pathsToRemove, templateFilePath)
+			hasChanged, err := storeTemplateFile(templateFilePath, tmpl.Body)
+			if err != nil {
+				return false, err
+			}
+
+			if hasChanged {
+				hasChanges = true
+			}
 		}
+
+		for pathToRemove := range pathsToRemove {
+			err := os.Remove(pathToRemove)
+			if err != nil {
+				level.Warn(am.logger).Log("msg", "failed to remove file", "file", pathToRemove, "err", err)
+			}
+			hasChanges = true
+		}
+		return hasChanges, nil
 	}
 
-	for _, tmpl := range cfg.Templates {
-		templateFilePath, err := safeTemplateFilepath(userTemplateDir, tmpl.Filename)
-		if err != nil {
-			return err
-		}
-
-		// Removing from pathsToRemove map the files that still exists in the config
-		delete(pathsToRemove, templateFilePath)
-		hasChanged, err := storeTemplateFile(templateFilePath, tmpl.Body)
-		if err != nil {
-			return err
-		}
-
-		if hasChanged {
-			hasTemplateChanges = true
-		}
+	hasTemplateChanges, err = updateTemplates(userTemplateDir, cfg.Templates)
+	if err != nil {
+		return err
 	}
 
-	// TODO There are two places where it is done. One here and one in Alertmanager (Wrapper config). Remove one?
-	for _, tmpl := range cfg.GrafanaTemplates {
-		templateFilePath, err := safeTemplateFilepath(userGrafanaTemplateDir, tmpl.Filename)
-		if err != nil {
-			return err
-		}
-
-		// Removing from pathsToRemove map the files that still exists in the config
-		delete(pathsToRemove, templateFilePath)
-		hasChanged, err := storeTemplateFile(templateFilePath, tmpl.Body)
-		if err != nil {
-			return err
-		}
-
-		if hasChanged {
-			hasTemplateChanges = true
-		}
-	}
-
-	for pathToRemove := range pathsToRemove {
-		err := os.Remove(pathToRemove)
-		if err != nil {
-			level.Warn(am.logger).Log("msg", "failed to remove file", "file", pathToRemove, "err", err)
-		}
-		hasTemplateChanges = true
-	}
+	hasGrafanaTemplateChanges, err = updateTemplates(userGrafanaTemplateDir, append(cfg.GrafanaTemplates, &alertspb.TemplateDesc{
+		Filename: "__default__.tmpl",
+		Body:     templates.DefaultTemplateString,
+	}))
 
 	level.Debug(am.logger).Log("msg", "setting config", "user", cfg.User)
 
@@ -771,7 +755,7 @@ func (am *MultitenantAlertmanager) setConfig(cfg alertspb.AlertConfigDesc) error
 			return err
 		}
 		am.alertmanagers[cfg.User] = newAM
-	} else if am.cfgs[cfg.User].RawConfig != cfg.RawConfig || hasTemplateChanges {
+	} else if am.cfgs[cfg.User].RawConfig != cfg.RawConfig || hasTemplateChanges || hasGrafanaTemplateChanges {
 		level.Info(am.logger).Log("msg", "updating new per-tenant alertmanager", "user", cfg.User)
 		// If the config changed, apply the new one.
 		err := existing.ApplyConfig(cfg.User, userAmConfig, rawCfg)
