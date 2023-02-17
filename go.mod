@@ -260,4 +260,5 @@ replace github.com/grafana/regexp => github.com/grafana/regexp v0.0.0-2022100509
 
 replace (
 	github.com/grafana/alerting => ../alerting
+	github.com/prometheus/alertmanager => github.com/grafana/prometheus-alertmanager v0.25.1-0.20230119183635-ec19b0a443b7
 )
