@@ -44,8 +44,6 @@ route:
       mute_time_intervals: []
       receiver: slack-notifications
       routes: []
-templates:
-  - test-template
 receivers:
   - name: slack-notifications
     slack_configs:
