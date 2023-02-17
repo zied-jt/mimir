@@ -20,7 +20,7 @@ import (
 // TODO working name... 100% change it
 type UserConfigWrapper interface {
 	InhibitRules() []config.InhibitRule
-	BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error)
+	BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) ([]*notify.Receiver, error)
 	TimeIntervals() map[string][]timeinterval.TimeInterval
 	Route() *config.Route
 
@@ -100,7 +100,7 @@ func (m MimirWrapper) InhibitRules() []config.InhibitRule {
 	return m.conf.InhibitRules
 }
 
-func (m MimirWrapper) BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error) {
+func (m MimirWrapper) BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOps []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) ([]*notify.Receiver, error) {
 	tmpl, err := buildTemplates(userID, filepath.Join(tenantDir, templatesDir), externalURL, m.conf.Templates)
 	if err != nil {
 		return nil, err

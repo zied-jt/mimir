@@ -310,7 +310,7 @@ func clusterWait(position func() int, timeout time.Duration) func() time.Duratio
 // ApplyConfig applies a new configuration to an Alertmanager.
 func (am *Alertmanager) ApplyConfig(userID string, conf UserConfigWrapper, rawCfg string) error {
 
-	am.api.Update(conf.Raw(), func(_ model.LabelSet) {})
+	am.api.Update(conf.Raw(), nil, func(_ model.LabelSet) {}) // TODO provide receivers to API
 
 	// Ensure inhibitor is set before being called
 	if am.inhibitor != nil {
@@ -426,14 +426,14 @@ func (am *Alertmanager) getFullState() (*clusterpb.FullState, error) {
 
 // buildIntegrationsMap builds a map of name to the list of integration notifiers off of a
 // list of receiver config.
-func buildIntegrationsMap(nc []config.Receiver, tmpl *template.Template, httpOps []commoncfg.HTTPClientOption, logger log.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error) {
-	integrationsMap := make(map[string][]notify.Integration, len(nc))
+func buildIntegrationsMap(nc []config.Receiver, tmpl *template.Template, httpOps []commoncfg.HTTPClientOption, logger log.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) ([]*notify.Receiver, error) {
+	integrationsMap := make([]*notify.Receiver, 0, len(nc))
 	for _, rcv := range nc {
 		integrations, err := buildReceiverIntegrations(rcv, tmpl, httpOps, logger, notifierWrapper)
 		if err != nil {
 			return nil, err
 		}
-		integrationsMap[rcv.Name] = integrations
+		integrationsMap = append(integrationsMap, notify.NewReceiver(rcv.Name, true, integrations))
 	}
 	return integrationsMap, nil
 }
@@ -441,10 +441,10 @@ func buildIntegrationsMap(nc []config.Receiver, tmpl *template.Template, httpOps
 // buildReceiverIntegrations builds a list of integration notifiers off of a
 // receiver config.
 // Taken from https://github.com/prometheus/alertmanager/blob/94d875f1227b29abece661db1a68c001122d1da5/cmd/alertmanager/main.go#L112-L159.
-func buildReceiverIntegrations(nc config.Receiver, tmpl *template.Template, httpOps []commoncfg.HTTPClientOption, logger log.Logger, wrapper func(string, notify.Notifier) notify.Notifier) ([]notify.Integration, error) {
+func buildReceiverIntegrations(nc config.Receiver, tmpl *template.Template, httpOps []commoncfg.HTTPClientOption, logger log.Logger, wrapper func(string, notify.Notifier) notify.Notifier) ([]*notify.Integration, error) {
 	var (
 		errs         types.MultiError
-		integrations []notify.Integration
+		integrations []*notify.Integration
 		add          = func(name string, i int, rs notify.ResolvedSender, f func(l log.Logger) (notify.Notifier, error)) {
 			n, err := f(log.With(logger, "integration", name))
 			if err != nil {

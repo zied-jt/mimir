@@ -87,7 +87,7 @@ func (r *RawMessage) UnmarshalJSON(data []byte) error {
 }
 
 func (r *RawMessage) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var data interface{}
+	var data map[string]interface{}
 	if err := unmarshal(&data); err != nil {
 		return err
 	}
@@ -117,16 +117,21 @@ type GrafanaWrapper struct {
 	receiverConfigs  []notify2.GrafanaReceiverTyped
 }
 
-func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOpts []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) (map[string][]notify.Integration, error) {
-	integrationMap, err := g.MimirWrapper.BuildIntegrationsMap(userID, tenantDir, externalURL, httpOpts, logger, notifierWrapper)
+func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, externalURL *url.URL, httpOpts []commoncfg.HTTPClientOption, logger gklog.Logger, notifierWrapper func(string, notify.Notifier) notify.Notifier) ([]*notify.Receiver, error) {
+	integrations, err := g.MimirWrapper.BuildIntegrationsMap(userID, tenantDir, externalURL, httpOpts, logger, notifierWrapper)
 	if err != nil {
 		return nil, err
 	}
 	if len(g.receiverConfigs) == 0 {
-		return integrationMap, nil
+		return integrations, nil
 	}
 
 	store := &images.UnavailableImageStore{} // TODO Need to figure out what to do with it
+
+	integrationMap := make(map[string]*notify.Receiver, len(integrations))
+	for _, integration := range integrations {
+		integrationMap[integration.Name()] = integration
+	}
 
 	grafanaTmpl, err := buildTemplates(userID, filepath.Join(tenantDir, grafanaTemplatesDir), externalURL, g.grafanaTemplates)
 	if err != nil {
@@ -134,7 +139,7 @@ func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, ex
 	}
 
 	for _, grafana := range g.receiverConfigs {
-		if integrations, ok := integrationMap[grafana.Name]; ok && len(integrations) > 0 {
+		if recv, ok := integrationMap[grafana.Name]; ok && len(recv.Integrations()) > 0 { // TODO Probably we can mix... shouldn't be a problem. Leave unmixed for now
 			return nil, fmt.Errorf("cannot build receiver integrations map, receiver %s declared twice", grafana.Name)
 		}
 
@@ -150,7 +155,7 @@ func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, ex
 			return &emailSender{}, nil
 		}
 
-		integrations, err := notify2.BuildReceiverIntegrations(grafana, grafanaTmpl, webhookCli, emailCli, store, func(ctx ...interface{}) logging.Logger {
+		integr, err := notify2.BuildReceiverIntegrations(grafana, grafanaTmpl, webhookCli, emailCli, store, func(ctx ...interface{}) logging.Logger {
 			return &alertingLogger{
 				l: gklog.With(logger, append([]interface{}{"logger"}, ctx...)),
 			}
@@ -161,13 +166,14 @@ func (g GrafanaWrapper) BuildIntegrationsMap(userID string, tenantDir string, ex
 			return nil, fmt.Errorf("failed to build integrations: %w", err)
 		}
 
-		integ := make([]notify.Integration, 0, len(integrations))
-		for _, integration := range integrations {
-			integ = append(integ, *integration)
-		}
-		integrationMap[grafana.Name] = integ
+		integrationMap[grafana.Name] = notify.NewReceiver(grafana.Name, true, integr)
 	}
-	return integrationMap, nil
+
+	result := make([]*notify.Receiver, 0, len(integrationMap))
+	for _, receiver := range integrationMap {
+		result = append(result, receiver)
+	}
+	return result, nil
 }
 
 func (g GrafanaWrapper) Raw() *config.Config {

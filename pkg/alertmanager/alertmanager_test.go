@@ -85,7 +85,7 @@ route:
 
 	cfg, err := config.Load(cfgRaw)
 	require.NoError(t, err)
-	require.NoError(t, am.ApplyConfig(user, cfg, cfgRaw))
+	require.NoError(t, am.ApplyConfig(user, MimirWrapper{conf: cfg}, cfgRaw))
 
 	now := time.Now()
 
@@ -168,7 +168,7 @@ route:
 
 	cfg, err := config.Load(cfgRaw)
 	require.NoError(t, err)
-	require.NoError(t, am.ApplyConfig(user, cfg, cfgRaw))
+	require.NoError(t, am.ApplyConfig(user, MimirWrapper{conf: cfg}, cfgRaw))
 
 	now := time.Now()
 	inputAlerts := []*types.Alert{
