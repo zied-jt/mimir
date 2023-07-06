@@ -65,25 +65,22 @@ type syncerMetrics struct {
 }
 
 func newSyncerMetrics(reg prometheus.Registerer, blocksMarkedForDeletion prometheus.Counter) *syncerMetrics {
-	var m syncerMetrics
-
-	m.garbageCollections = promauto.With(reg).NewCounter(prometheus.CounterOpts{
-		Name: "thanos_compact_garbage_collection_total",
-		Help: "Total number of garbage collection operations.",
-	})
-	m.garbageCollectionFailures = promauto.With(reg).NewCounter(prometheus.CounterOpts{
-		Name: "thanos_compact_garbage_collection_failures_total",
-		Help: "Total number of failed garbage collection operations.",
-	})
-	m.garbageCollectionDuration = promauto.With(reg).NewHistogram(prometheus.HistogramOpts{
-		Name:    "thanos_compact_garbage_collection_duration_seconds",
-		Help:    "Time it took to perform garbage collection iteration.",
-		Buckets: []float64{0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120, 240, 360, 720},
-	})
-
-	m.blocksMarkedForDeletion = blocksMarkedForDeletion
-
-	return &m
+	return &syncerMetrics{
+		garbageCollections: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Name: "thanos_compact_garbage_collection_total",
+			Help: "Total number of garbage collection operations.",
+		}),
+		garbageCollectionFailures: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Name: "thanos_compact_garbage_collection_failures_total",
+			Help: "Total number of failed garbage collection operations.",
+		}),
+		garbageCollectionDuration: promauto.With(reg).NewHistogram(prometheus.HistogramOpts{
+			Name:    "thanos_compact_garbage_collection_duration_seconds",
+			Help:    "Time it took to perform garbage collection iteration.",
+			Buckets: []float64{0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120, 240, 360, 720},
+		}),
+		blocksMarkedForDeletion: blocksMarkedForDeletion,
+	}
 }
 
 // newMetaSyncer returns a new metaSyncer for the given Bucket and directory.
@@ -338,10 +335,9 @@ func (c *BucketCompactor) runCompactionJob(ctx context.Context, job *Job) (shoul
 	for ix, meta := range toCompact {
 		blocksToCompactDirs[ix] = filepath.Join(subDir, meta.ULID.String())
 	}
-	toCompactStrs := strings.Join(blocksToCompactDirs, ",")
 
 	elapsed := time.Since(downloadBegin)
-	level.Info(jobLogger).Log("msg", "downloaded and verified blocks; compacting blocks", "blocks", len(blocksToCompactDirs), "plan", toCompactStrs, "duration", elapsed, "duration_ms", elapsed.Milliseconds())
+	level.Info(jobLogger).Log("msg", "downloaded and verified blocks; compacting blocks", "block_count", len(blocksToCompactDirs), "blocks", toCompactStr, "duration", elapsed, "duration_ms", elapsed.Milliseconds())
 
 	compactionBegin := time.Now()
 
@@ -353,17 +349,19 @@ func (c *BucketCompactor) runCompactionJob(ctx context.Context, job *Job) (shoul
 		compIDs = append(compIDs, compID)
 	}
 	if err != nil {
-		return false, nil, errors.Wrapf(err, "compact blocks %s", toCompactStrs)
+		return false, nil, errors.Wrapf(err, "compact blocks %s", toCompactStr)
 	}
 
 	if !hasNonZeroULIDs(compIDs) {
 		// Prometheus compactor found that the compacted block would have no samples.
-		level.Info(jobLogger).Log("msg", "compacted block would have no samples, deleting source blocks", "blocks", toCompactStrs)
+		level.Info(jobLogger).Log("msg", "compacted block would have no samples, deleting source blocks", "blocks", toCompactStr)
 		for _, meta := range toCompact {
-			if meta.Stats.NumSamples == 0 {
-				if err := deleteBlock(c.bkt, meta.ULID, filepath.Join(subDir, meta.ULID.String()), jobLogger, c.metrics.blocksMarkedForDeletion); err != nil {
-					level.Warn(jobLogger).Log("msg", "failed to mark for deletion an empty block found during compaction", "block", meta.ULID, "err", err)
-				}
+			if meta.Stats.NumSamples > 0 {
+				continue
+			}
+
+			if err := deleteBlock(c.bkt, meta.ULID, filepath.Join(subDir, meta.ULID.String()), jobLogger, c.metrics.blocksMarkedForDeletion); err != nil {
+				level.Warn(jobLogger).Log("msg", "failed to mark for deletion an empty block found during compaction", "block", meta.ULID, "err", err)
 			}
 		}
 		// Even though this block was empty, there may be more work to do.
@@ -371,7 +369,7 @@ func (c *BucketCompactor) runCompactionJob(ctx context.Context, job *Job) (shoul
 	}
 
 	elapsed = time.Since(compactionBegin)
-	level.Info(jobLogger).Log("msg", "compacted blocks", "new", fmt.Sprintf("%v", compIDs), "blocks", toCompactStrs, "duration", elapsed, "duration_ms", elapsed.Milliseconds())
+	level.Info(jobLogger).Log("msg", "compacted blocks", "new", fmt.Sprintf("%v", compIDs), "blocks", toCompactStr, "duration", elapsed, "duration_ms", elapsed.Milliseconds())
 
 	uploadBegin := time.Now()
 	uploadedBlocks := atomic.NewInt64(0)
@@ -405,7 +403,7 @@ func (c *BucketCompactor) runCompactionJob(ctx context.Context, job *Job) (shoul
 			return errors.Wrapf(err, "failed to finalize the block %s", bdir)
 		}
 
-		if err = os.Remove(filepath.Join(bdir, "tombstones")); err != nil {
+		if err := os.Remove(filepath.Join(bdir, "tombstones")); err != nil {
 			return errors.Wrap(err, "remove tombstones")
 		}
 
