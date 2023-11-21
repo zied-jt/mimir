@@ -1404,6 +1404,12 @@ func TestLoadingSeriesChunkRefsSetIterator(t *testing.T) {
 			sets := readAllSeriesChunkRefsSet(loadingIterator)
 			assert.NoError(t, loadingIterator.Err())
 			assertSeriesChunkRefsSetsEqual(t, block.meta.ULID, block.bkt.(localBucket).dir, tc.minT, tc.maxT, tc.strategy, tc.expectedSets, sets)
+
+			// Ensure that the iterator behaves correctly after a reset.
+			loadingIterator.Reset()
+			setsAfterReset := readAllSeriesChunkRefsSet(loadingIterator)
+			assert.NoError(t, loadingIterator.Err())
+			assertSeriesChunkRefsSetsEqual(t, block.meta.ULID, block.bkt.(localBucket).dir, tc.minT, tc.maxT, tc.strategy, tc.expectedSets, setsAfterReset)
 		})
 	}
 }
@@ -2280,9 +2286,19 @@ func TestPostingsSetsIterator(t *testing.T) {
 			var actualBatches [][]storage.SeriesRef
 			for iterator.Next() {
 				actualBatches = append(actualBatches, iterator.At())
+
+				if len(testCase.expectedBatches) != 1 {
+					assert.False(t, iterator.IsFirstAndOnlyBatch())
+				}
 			}
 
 			assert.ElementsMatch(t, testCase.expectedBatches, actualBatches)
+
+			if len(testCase.expectedBatches) == 1 {
+				assert.True(t, iterator.IsFirstAndOnlyBatch())
+			} else if len(testCase.expectedBatches) == 0 {
+				assert.False(t, iterator.IsFirstAndOnlyBatch())
+			}
 		})
 	}
 }
