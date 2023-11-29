@@ -1812,6 +1812,21 @@ func (m *seriesHashmap) get(hash uint64, lset labels.Labels) *memSeries {
 	return nil
 }
 
+// Fetch a series from the map, given a function which says whether it's the right Labels.
+func (m *seriesHashmap) getByFunc(hash uint64, cmp func(labels.Labels) bool) *memSeries {
+	if s, found := m.unique[hash]; found {
+		if cmp(s.lset) {
+			return s
+		}
+	}
+	for _, s := range m.conflicts[hash] {
+		if cmp(s.lset) {
+			return s
+		}
+	}
+	return nil
+}
+
 func (m *seriesHashmap) set(hash uint64, s *memSeries) {
 	if existing, found := m.unique[hash]; !found || labels.Equal(existing.lset, s.lset) {
 		m.unique[hash] = s
@@ -2018,6 +2033,16 @@ func (s *stripeSeries) getByHash(hash uint64, lset labels.Labels) *memSeries {
 
 	s.locks[i].RLock()
 	series := s.hashes[i].get(hash, lset)
+	s.locks[i].RUnlock()
+
+	return series
+}
+
+func (s *stripeSeries) getByHashFunc(hash uint64, cmp func(labels.Labels) bool) *memSeries {
+	i := hash & uint64(s.size-1)
+
+	s.locks[i].RLock()
+	series := s.hashes[i].getByFunc(hash, cmp)
 	s.locks[i].RUnlock()
 
 	return series
@@ -2412,4 +2437,36 @@ func (h *Head) ForEachSecondaryHash(fn func(secondaryHash []uint32)) {
 			fn(buf)
 		}
 	}
+}
+
+// WARNING: This code introduces a race - `lset` is accessed without a lock.
+// Go through all the series in h, build a SymbolTable with all names and values,
+// replace each series' Labels with one using that SymbolTable.
+func (h *Head) RebuildSymbolTable() *labels.SymbolTable {
+	st := labels.NewSymbolTable()
+	builder := labels.NewScratchBuilderWithSymbolTable(st, 0)
+	rebuildLabels := func(lbls labels.Labels) labels.Labels {
+		builder.Reset()
+		lbls.Range(func(l labels.Label) {
+			builder.Add(l.Name, l.Value)
+		})
+		return builder.Labels()
+	}
+
+	for i := 0; i < h.series.size; i++ {
+		h.series.locks[i].Lock()
+
+		for _, s := range h.series.hashes[i].unique {
+			s.lset = rebuildLabels(s.lset)
+		}
+
+		for _, all := range h.series.hashes[i].conflicts {
+			for _, s := range all {
+				s.lset = rebuildLabels(s.lset)
+			}
+		}
+
+		h.series.locks[i].Unlock()
+	}
+	return st
 }

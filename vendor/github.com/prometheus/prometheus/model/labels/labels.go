@@ -349,7 +349,9 @@ func (ls Labels) DropMetricName() Labels {
 			if i == 0 { // Make common case fast with no allocations.
 				return ls[1:]
 			}
-			return append(ls[:i], ls[i+1:]...)
+			// Avoid modifying original Labels - use [:i:i] so that left slice would not
+			// have any spare capacity and append would have to allocate a new slice for the result.
+			return append(ls[:i:i], ls[i+1:]...)
 		}
 	}
 	return ls
@@ -484,4 +486,15 @@ func (b *ScratchBuilder) Labels() Labels {
 // Callers must ensure that there are no other references to ls, or any strings fetched from it.
 func (b *ScratchBuilder) Overwrite(ls *Labels) {
 	*ls = append((*ls)[:0], b.add...)
+}
+
+// Equal returns true if the Builder would build Labels the same as passed in.
+func (b *ScratchBuilder) Equal(a Labels) bool {
+	return Equal(b.add, a)
+}
+
+// Hash returns a hash value for the label set.
+// Note: the result must be consistent with what Labels.Hash() would return.
+func (b *ScratchBuilder) Hash() uint64 {
+	return b.add.Hash()
 }
