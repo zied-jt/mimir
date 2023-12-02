@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1002,7 +1003,6 @@ func (i *Ingester) PushWithCleanup(ctx context.Context, req *mimirpb.WriteReques
 	}
 
 	minAppendTime, minAppendTimeAvailable := db.Head().AppendableMinValidTime()
-
 	err = i.pushSamplesToAppender(userID, req.Timeseries, app, startAppend, &stats, updateFirstPartial, activeSeries, i.limits.OutOfOrderTimeWindow(userID), minAppendTimeAvailable, minAppendTime)
 	if err != nil {
 		if err := app.Rollback(); err != nil {
@@ -3363,6 +3363,14 @@ func (i *Ingester) checkAvailable() error {
 
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
+	// we are making every 3rd request to ingesters from zone-b slow
+	if i.cfg.IngesterRing.InstanceID == "ingester-zone-b-0" || i.cfg.IngesterRing.InstanceID == "ingester-zone-b-2" {
+		pivot := rand.Intn(100)
+		if pivot%3 == 0 {
+			time.Sleep(5 * time.Second)
+			level.Error(i.logger).Log("msg", "slept for 5s and will continue", "ingester", i.cfg.IngesterRing.InstanceID)
+		}
+	}
 	err := i.PushWithCleanup(ctx, req, func() { mimirpb.ReuseSlice(req.Timeseries) })
 	if err == nil {
 		return &mimirpb.WriteResponse{}, nil
