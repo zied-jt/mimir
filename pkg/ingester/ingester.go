@@ -3361,13 +3361,30 @@ func (i *Ingester) checkAvailable() error {
 	return newUnavailableError(s)
 }
 
+func (i *Ingester) slowDown(duration time.Duration) {
+	done := make(chan int)
+	for i := 0; i < 3; i++ {
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	time.Sleep(duration)
+	close(done)
+}
+
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
 	// we are making every 3rd request to ingesters from zone-b slow
-	if i.cfg.IngesterRing.InstanceID == "ingester-zone-b-0" || i.cfg.IngesterRing.InstanceID == "ingester-zone-b-2" {
+	if i.cfg.IngesterRing.InstanceID == "ingester-zone-b-6" || i.cfg.IngesterRing.InstanceID == "ingester-zone-b-7" {
 		pivot := rand.Intn(100)
 		if pivot%3 == 0 {
-			time.Sleep(5 * time.Second)
+			i.slowDown(5 * time.Second)
 			level.Error(i.logger).Log("msg", "slept for 5s and will continue", "ingester", i.cfg.IngesterRing.InstanceID)
 		}
 	}
