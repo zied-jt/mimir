@@ -1175,6 +1175,15 @@ instance_limits:
 # CLI flag: -ingester.return-only-grpc-errors
 [return_only_grpc_errors: <boolean> | default = true]
 
+# (experimental) Percentage of push request in zone b that should fail.
+# CLI flag: -ingester.failing-percentage-zone-b
+[failing_percentage_zone_b: <int> | default = 0]
+
+# (failing_ingesters_zone_b) Comma-separated list of ingesters from zone-b that
+# should fail.
+# CLI flag: -ingester.failing-ingesters-zone-b
+[failing_ingesters_zone_b: <string> | default = ""]
+
 # (experimental) When enabled, only series currently owned by ingester according
 # to the ring are used when checking user per-tenant series limit.
 # CLI flag: -ingester.use-ingester-owned-series-for-limits

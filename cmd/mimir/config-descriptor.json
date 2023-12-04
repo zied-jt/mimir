@@ -3045,6 +3045,28 @@
         },
         {
           "kind": "field",
+          "name": "failing_percentage_zone_b",
+          "required": false,
+          "desc": "Percentage of push request in zone b that should fail.",
+          "fieldValue": null,
+          "fieldDefaultValue": 0,
+          "fieldFlag": "ingester.failing-percentage-zone-b",
+          "fieldType": "int",
+          "fieldCategory": "experimental"
+        },
+        {
+          "kind": "field",
+          "name": "failing_ingesters_zone_b",
+          "required": false,
+          "desc": "Comma-separated list of ingesters from zone-b that should fail.",
+          "fieldValue": null,
+          "fieldDefaultValue": "",
+          "fieldFlag": "ingester.failing-ingesters-zone-b",
+          "fieldType": "string",
+          "fieldCategory": "failing_ingesters_zone_b"
+        },
+        {
+          "kind": "field",
           "name": "use_ingester_owned_series_for_limits",
           "required": false,
           "desc": "When enabled, only series currently owned by ingester according to the ring are used when checking user per-tenant series limit.",
