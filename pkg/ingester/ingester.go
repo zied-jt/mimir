@@ -3380,10 +3380,10 @@ func (i *Ingester) slowDown(duration time.Duration) {
 
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	// we are making every 3rd request to ingesters from zone-b slow
+	// we are making 10% of request to ingesters 6 and 7 from zone-b slow
 	if i.cfg.IngesterRing.InstanceID == "ingester-zone-b-6" || i.cfg.IngesterRing.InstanceID == "ingester-zone-b-7" {
 		pivot := rand.Intn(100)
-		if pivot%3 == 0 {
+		if pivot%10 == 0 {
 			i.slowDown(5 * time.Second)
 			level.Error(i.logger).Log("msg", "slept for 5s and will continue", "ingester", i.cfg.IngesterRing.InstanceID)
 		}
