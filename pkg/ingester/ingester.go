@@ -3368,7 +3368,7 @@ func (i *Ingester) checkAvailable() error {
 	return newUnavailableError(s)
 }
 
-func (i *Ingester) slowDown(duration time.Duration) {
+func (i *Ingester) slowDown(userID string, duration time.Duration) {
 	done := make(chan int)
 	nCPU := int(i.cfg.ConcurrentCallsZoneB)
 	if nCPU == 0 {
@@ -3387,17 +3387,23 @@ func (i *Ingester) slowDown(duration time.Duration) {
 	}
 	time.Sleep(duration)
 	close(done)
+	level.Error(i.logger).Log("msg", "slept for 5s and will continue", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
 }
 
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
 	if i.cfg.FailingPercentageZoneB > 0 && i.cfg.FailingPercentageZoneB <= 100 {
 		if slices.Contains(i.cfg.FailingIngestersZoneB, i.cfg.IngesterRing.InstanceID) {
-			pivot := uint64(rand.Intn(100))
-			q := 100 / i.cfg.FailingPercentageZoneB
-			if pivot%q == 0 {
-				i.slowDown(5 * time.Second)
-				level.Error(i.logger).Log("msg", "slept for 5s and will continue", "ingester", i.cfg.IngesterRing.InstanceID)
+			userID, err := tenant.TenantID(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if userID == "circuit_breaker_test" {
+				pivot := uint64(rand.Intn(100))
+				q := 100 / i.cfg.FailingPercentageZoneB
+				if pivot%q == 0 {
+					i.slowDown(userID, 5*time.Second)
+				}
 			}
 		}
 	}
