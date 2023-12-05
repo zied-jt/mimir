@@ -1179,10 +1179,13 @@ instance_limits:
 # CLI flag: -ingester.failing-percentage-zone-b
 [failing_percentage_zone_b: <int> | default = 0]
 
-# (failing_ingesters_zone_b) Comma-separated list of ingesters from zone-b that
-# should fail.
+# (experimental) Comma-separated list of ingesters from zone-b that should fail.
 # CLI flag: -ingester.failing-ingesters-zone-b
 [failing_ingesters_zone_b: <string> | default = ""]
+
+# (experimental) Number of CPUs to use for the simulation.
+# CLI flag: -ingester.concurrent-calls-zone-b
+[concurrent_calls_zone_b: <int> | default = 1]
 
 # (experimental) When enabled, only series currently owned by ingester according
 # to the ring are used when checking user per-tenant series limit.

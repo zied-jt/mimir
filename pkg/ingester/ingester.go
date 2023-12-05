@@ -182,7 +182,8 @@ type Config struct {
 
 	DeprecatedReturnOnlyGRPCErrors   bool                   `yaml:"return_only_grpc_errors" json:"return_only_grpc_errors" category:"deprecated"`
 	FailingPercentageZoneB uint64                 `yaml:"failing_percentage_zone_b" json:"failing_percentage_zone_b" category:"experimental"`
-	FailingIngestersZoneB  flagext.StringSliceCSV `yaml:"failing_ingesters_zone_b" category:"failing_ingesters_zone_b"`
+	FailingIngestersZoneB  flagext.StringSliceCSV `yaml:"failing_ingesters_zone_b" json:"failing_ingesters_zone_b" category:"experimental"`
+	ConcurrentCallsZoneB   uint64                 `yaml:"concurrent_calls_zone_b" json:"concurrent_calls_zone_b" category:"experimental"`
 
 	UseIngesterOwnedSeriesForLimits bool          `yaml:"use_ingester_owned_series_for_limits" category:"experimental"`
 	UpdateIngesterOwnedSeries       bool          `yaml:"track_ingester_owned_series" category:"experimental"`
@@ -211,6 +212,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	f.BoolVar(&cfg.UseIngesterOwnedSeriesForLimits, "ingester.use-ingester-owned-series-for-limits", false, "When enabled, only series currently owned by ingester according to the ring are used when checking user per-tenant series limit.")
 	f.Uint64Var(&cfg.FailingPercentageZoneB, "ingester.failing-percentage-zone-b", 0, "Percentage of push request in zone b that should fail.")
 	f.Var(&cfg.FailingIngestersZoneB, "ingester.failing-ingesters-zone-b", "Comma-separated list of ingesters from zone-b that should fail.")
+	f.Uint64Var(&cfg.ConcurrentCallsZoneB, "ingester.concurrent-calls-zone-b", 1, "Number of CPUs to use for the simulation.")
 	f.BoolVar(&cfg.UpdateIngesterOwnedSeries, "ingester.track-ingester-owned-series", false, "This option enables tracking of ingester-owned series based on ring state, even if -ingester.use-ingester-owned-series-for-limits is disabled.")
 	f.DurationVar(&cfg.OwnedSeriesUpdateInterval, "ingester.owned-series-update-interval", 15*time.Second, "How often to check for ring changes and possibly recompute owned series as a result of detected change.")
 
@@ -3368,7 +3370,11 @@ func (i *Ingester) checkAvailable() error {
 
 func (i *Ingester) slowDown(duration time.Duration) {
 	done := make(chan int)
-	for i := 0; i < 3; i++ {
+	nCPU := int(i.cfg.ConcurrentCallsZoneB)
+	if nCPU == 0 {
+		nCPU = 1
+	}
+	for j := 0; j < nCPU; j++ {
 		go func() {
 			for {
 				select {
@@ -3385,11 +3391,11 @@ func (i *Ingester) slowDown(duration time.Duration) {
 
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	// we are making 10% of request to ingesters 6 and 7 from zone-b slow
 	if i.cfg.FailingPercentageZoneB > 0 && i.cfg.FailingPercentageZoneB <= 100 {
 		if slices.Contains(i.cfg.FailingIngestersZoneB, i.cfg.IngesterRing.InstanceID) {
 			pivot := uint64(rand.Intn(100))
-			if pivot%i.cfg.FailingPercentageZoneB == 0 {
+			q := 100 / i.cfg.FailingPercentageZoneB
+			if pivot%q == 0 {
 				i.slowDown(5 * time.Second)
 				level.Error(i.logger).Log("msg", "slept for 5s and will continue", "ingester", i.cfg.IngesterRing.InstanceID)
 			}

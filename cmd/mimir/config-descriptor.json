@@ -3063,7 +3063,18 @@
           "fieldDefaultValue": "",
           "fieldFlag": "ingester.failing-ingesters-zone-b",
           "fieldType": "string",
-          "fieldCategory": "failing_ingesters_zone_b"
+          "fieldCategory": "experimental"
+        },
+        {
+          "kind": "field",
+          "name": "concurrent_calls_zone_b",
+          "required": false,
+          "desc": "Number of CPUs to use for the simulation.",
+          "fieldValue": null,
+          "fieldDefaultValue": 1,
+          "fieldFlag": "ingester.concurrent-calls-zone-b",
+          "fieldType": "int",
+          "fieldCategory": "experimental"
         },
         {
           "kind": "field",
