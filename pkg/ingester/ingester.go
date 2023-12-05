@@ -51,6 +51,7 @@ import (
 	"go.uber.org/atomic"
 	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
 
 	"github.com/grafana/mimir/pkg/ingester/activeseries"
 	"github.com/grafana/mimir/pkg/ingester/client"
@@ -181,9 +182,10 @@ type Config struct {
 	ErrorSampleRate int64 `yaml:"error_sample_rate" json:"error_sample_rate" category:"experimental"`
 
 	DeprecatedReturnOnlyGRPCErrors   bool                   `yaml:"return_only_grpc_errors" json:"return_only_grpc_errors" category:"deprecated"`
-	FailingPercentageZoneB uint64                 `yaml:"failing_percentage_zone_b" json:"failing_percentage_zone_b" category:"experimental"`
-	FailingIngestersZoneB  flagext.StringSliceCSV `yaml:"failing_ingesters_zone_b" json:"failing_ingesters_zone_b" category:"experimental"`
-	ConcurrentCallsZoneB   uint64                 `yaml:"concurrent_calls_zone_b" json:"concurrent_calls_zone_b" category:"experimental"`
+	FailingPercentage      uint64                 `yaml:"failing_percentage" json:"failing_percentage" category:"experimental"`
+	FailingIngesters       flagext.StringSliceCSV `yaml:"failing_ingesters" json:"ffailing_ingesters" category:"experimental"`
+	FailingStatus          string                 `yaml:"failing_status" json:"failing_status" category:"experimental"`
+	FailingConcurrentCalls uint64                 `yaml:"failing_concurrent_calls" json:"failing_concurrent_calls" category:"experimental"`
 
 	UseIngesterOwnedSeriesForLimits bool          `yaml:"use_ingester_owned_series_for_limits" category:"experimental"`
 	UpdateIngesterOwnedSeries       bool          `yaml:"track_ingester_owned_series" category:"experimental"`
@@ -210,9 +212,10 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	f.BoolVar(&cfg.LimitInflightRequestsUsingGrpcMethodLimiter, "ingester.limit-inflight-requests-using-grpc-method-limiter", false, "Use experimental method of limiting push requests.")
 	f.Int64Var(&cfg.ErrorSampleRate, "ingester.error-sample-rate", 0, "Each error will be logged once in this many times. Use 0 to log all of them.")
 	f.BoolVar(&cfg.UseIngesterOwnedSeriesForLimits, "ingester.use-ingester-owned-series-for-limits", false, "When enabled, only series currently owned by ingester according to the ring are used when checking user per-tenant series limit.")
-	f.Uint64Var(&cfg.FailingPercentageZoneB, "ingester.failing-percentage-zone-b", 0, "Percentage of push request in zone b that should fail.")
-	f.Var(&cfg.FailingIngestersZoneB, "ingester.failing-ingesters-zone-b", "Comma-separated list of ingesters from zone-b that should fail.")
-	f.Uint64Var(&cfg.ConcurrentCallsZoneB, "ingester.concurrent-calls-zone-b", 0, "Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.")
+	f.Uint64Var(&cfg.FailingPercentage, "ingester.failing-percentage", 100, "Percentage (1-100) of push request that should fail.")
+	f.StringVar(&cfg.FailingStatus, "ingester.failing-status", "DeadlineExceeded", "Failing gRPC status that should be returned. Possible values \"Unavailable\" and \"DeadlineExceeded\"")
+	f.Var(&cfg.FailingIngesters, "ingester.failing-ingesters", "Comma-separated list of ingesters that should fail.")
+	f.Uint64Var(&cfg.FailingConcurrentCalls, "ingester.failing-concurrent-calls", 0, "Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.")
 	f.BoolVar(&cfg.UpdateIngesterOwnedSeries, "ingester.track-ingester-owned-series", false, "This option enables tracking of ingester-owned series based on ring state, even if -ingester.use-ingester-owned-series-for-limits is disabled.")
 	f.DurationVar(&cfg.OwnedSeriesUpdateInterval, "ingester.owned-series-update-interval", 15*time.Second, "How often to check for ring changes and possibly recompute owned series as a result of detected change.")
 
@@ -3370,7 +3373,7 @@ func (i *Ingester) checkAvailable() error {
 
 func (i *Ingester) slowDown(userID string, duration time.Duration) {
 	done := make(chan int)
-	nCPU := int(i.cfg.ConcurrentCallsZoneB)
+	nCPU := int(i.cfg.FailingConcurrentCalls)
 	if nCPU > 0 {
 		for j := 0; j < nCPU; j++ {
 			go func() {
@@ -3391,16 +3394,21 @@ func (i *Ingester) slowDown(userID string, duration time.Duration) {
 
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	if i.cfg.FailingPercentageZoneB > 0 && i.cfg.FailingPercentageZoneB <= 100 {
-		if slices.Contains(i.cfg.FailingIngestersZoneB, i.cfg.IngesterRing.InstanceID) {
+	if i.cfg.FailingPercentage > 0 && i.cfg.FailingPercentage <= 100 {
+		if slices.Contains(i.cfg.FailingIngesters, i.cfg.IngesterRing.InstanceID) {
 			userID, err := tenant.TenantID(ctx)
 			if err != nil {
 				return nil, err
 			}
 			pivot := uint64(rand.Intn(100))
-			q := 100 / i.cfg.FailingPercentageZoneB
+			q := 100 / i.cfg.FailingPercentage
 			if pivot%q == 0 {
-				i.slowDown(userID, 5*time.Second)
+				if i.cfg.FailingStatus == "DeadlineExceeded" {
+					i.slowDown(userID, 5*time.Second)
+				} else if i.cfg.FailingStatus == "Unavailable" {
+					level.Error(i.logger).Log("msg", "this ingester is currently unavailable", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
+					return nil, newErrorWithStatus(newUnavailableError(services.Stopping), codes.Unavailable)
+				}
 			}
 		}
 	}

@@ -1175,18 +1175,23 @@ instance_limits:
 # CLI flag: -ingester.return-only-grpc-errors
 [return_only_grpc_errors: <boolean> | default = true]
 
-# (experimental) Percentage of push request in zone b that should fail.
-# CLI flag: -ingester.failing-percentage-zone-b
-[failing_percentage_zone_b: <int> | default = 0]
+# (experimental) Percentage (1-100) of push request that should fail.
+# CLI flag: -ingester.failing-percentage
+[failing_percentage: <int> | default = 100]
 
-# (experimental) Comma-separated list of ingesters from zone-b that should fail.
-# CLI flag: -ingester.failing-ingesters-zone-b
-[failing_ingesters_zone_b: <string> | default = ""]
+# (experimental) Comma-separated list of ingesters that should fail.
+# CLI flag: -ingester.failing-ingesters
+[failing_ingesters: <string> | default = ""]
+
+# (experimental) Failing gRPC status that should be returned. Possible values
+# "Unavailable" and "DeadlineExceeded"
+# CLI flag: -ingester.failing-status
+[failing_status: <string> | default = "DeadlineExceeded"]
 
 # (experimental) Number of CPUs to use for the simulation. It defaults to 0
 # meaning without additional CPU usage.
-# CLI flag: -ingester.concurrent-calls-zone-b
-[concurrent_calls_zone_b: <int> | default = 0]
+# CLI flag: -ingester.failing-concurrent-calls
+[failing_concurrent_calls: <int> | default = 0]
 
 # (experimental) When enabled, only series currently owned by ingester according
 # to the ring are used when checking user per-tenant series limit.

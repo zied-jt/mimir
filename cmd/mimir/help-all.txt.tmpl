@@ -1319,14 +1319,16 @@ Usage of ./cmd/mimir/mimir:
     	Override the default minimum TLS version. Allowed values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13
   -ingester.client.tls-server-name string
     	Override the expected name on the server certificate.
-  -ingester.concurrent-calls-zone-b uint
-    	[experimental] Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.
   -ingester.error-sample-rate int
     	[experimental] Each error will be logged once in this many times. Use 0 to log all of them.
-  -ingester.failing-ingesters-zone-b comma-separated-list-of-strings
-    	[experimental] Comma-separated list of ingesters from zone-b that should fail.
-  -ingester.failing-percentage-zone-b uint
-    	[experimental] Percentage of push request in zone b that should fail.
+  -ingester.failing-concurrent-calls uint
+    	[experimental] Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.
+  -ingester.failing-ingesters comma-separated-list-of-strings
+    	[experimental] Comma-separated list of ingesters that should fail.
+  -ingester.failing-percentage uint
+    	[experimental] Percentage (1-100) of push request that should fail. (default 100)
+  -ingester.failing-status string
+    	[experimental] Failing gRPC status that should be returned. Possible values "Unavailable" and "DeadlineExceeded" (default "DeadlineExceeded")
   -ingester.ignore-series-limit-for-metric-names string
     	Comma-separated list of metric names, for which the -ingester.max-global-series-per-metric limit will be ignored. Does not affect the -ingester.max-global-series-per-user limit.
   -ingester.instance-limits.max-inflight-push-requests int
