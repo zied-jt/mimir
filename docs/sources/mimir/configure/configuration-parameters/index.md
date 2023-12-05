@@ -1183,9 +1183,10 @@ instance_limits:
 # CLI flag: -ingester.failing-ingesters-zone-b
 [failing_ingesters_zone_b: <string> | default = ""]
 
-# (experimental) Number of CPUs to use for the simulation.
+# (experimental) Number of CPUs to use for the simulation. It defaults to 0
+# meaning without additional CPU usage.
 # CLI flag: -ingester.concurrent-calls-zone-b
-[concurrent_calls_zone_b: <int> | default = 1]
+[concurrent_calls_zone_b: <int> | default = 0]
 
 # (experimental) When enabled, only series currently owned by ingester according
 # to the ring are used when checking user per-tenant series limit.

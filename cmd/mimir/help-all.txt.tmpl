@@ -1320,7 +1320,7 @@ Usage of ./cmd/mimir/mimir:
   -ingester.client.tls-server-name string
     	Override the expected name on the server certificate.
   -ingester.concurrent-calls-zone-b uint
-    	[experimental] Number of CPUs to use for the simulation. (default 1)
+    	[experimental] Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.
   -ingester.error-sample-rate int
     	[experimental] Each error will be logged once in this many times. Use 0 to log all of them.
   -ingester.failing-ingesters-zone-b comma-separated-list-of-strings

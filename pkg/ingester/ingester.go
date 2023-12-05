@@ -212,7 +212,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	f.BoolVar(&cfg.UseIngesterOwnedSeriesForLimits, "ingester.use-ingester-owned-series-for-limits", false, "When enabled, only series currently owned by ingester according to the ring are used when checking user per-tenant series limit.")
 	f.Uint64Var(&cfg.FailingPercentageZoneB, "ingester.failing-percentage-zone-b", 0, "Percentage of push request in zone b that should fail.")
 	f.Var(&cfg.FailingIngestersZoneB, "ingester.failing-ingesters-zone-b", "Comma-separated list of ingesters from zone-b that should fail.")
-	f.Uint64Var(&cfg.ConcurrentCallsZoneB, "ingester.concurrent-calls-zone-b", 1, "Number of CPUs to use for the simulation.")
+	f.Uint64Var(&cfg.ConcurrentCallsZoneB, "ingester.concurrent-calls-zone-b", 0, "Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.")
 	f.BoolVar(&cfg.UpdateIngesterOwnedSeries, "ingester.track-ingester-owned-series", false, "This option enables tracking of ingester-owned series based on ring state, even if -ingester.use-ingester-owned-series-for-limits is disabled.")
 	f.DurationVar(&cfg.OwnedSeriesUpdateInterval, "ingester.owned-series-update-interval", 15*time.Second, "How often to check for ring changes and possibly recompute owned series as a result of detected change.")
 
@@ -3371,19 +3371,18 @@ func (i *Ingester) checkAvailable() error {
 func (i *Ingester) slowDown(userID string, duration time.Duration) {
 	done := make(chan int)
 	nCPU := int(i.cfg.ConcurrentCallsZoneB)
-	if nCPU == 0 {
-		nCPU = 1
-	}
-	for j := 0; j < nCPU; j++ {
-		go func() {
-			for {
-				select {
-				case <-done:
-					return
-				default:
+	if nCPU > 0 {
+		for j := 0; j < nCPU; j++ {
+			go func() {
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
 				}
-			}
-		}()
+			}()
+		}
 	}
 	time.Sleep(duration)
 	close(done)
@@ -3398,12 +3397,10 @@ func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirp
 			if err != nil {
 				return nil, err
 			}
-			if userID == "circuit_breaker_test" {
-				pivot := uint64(rand.Intn(100))
-				q := 100 / i.cfg.FailingPercentageZoneB
-				if pivot%q == 0 {
-					i.slowDown(userID, 5*time.Second)
-				}
+			pivot := uint64(rand.Intn(100))
+			q := 100 / i.cfg.FailingPercentageZoneB
+			if pivot%q == 0 {
+				i.slowDown(userID, 5*time.Second)
 			}
 		}
 	}

@@ -3069,9 +3069,9 @@
           "kind": "field",
           "name": "concurrent_calls_zone_b",
           "required": false,
-          "desc": "Number of CPUs to use for the simulation.",
+          "desc": "Number of CPUs to use for the simulation. It defaults to 0 meaning without additional CPU usage.",
           "fieldValue": null,
-          "fieldDefaultValue": 1,
+          "fieldDefaultValue": 0,
           "fieldFlag": "ingester.concurrent-calls-zone-b",
           "fieldType": "int",
           "fieldCategory": "experimental"
