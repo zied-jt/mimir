@@ -181,11 +181,11 @@ type Config struct {
 
 	ErrorSampleRate int64 `yaml:"error_sample_rate" json:"error_sample_rate" category:"experimental"`
 
-	DeprecatedReturnOnlyGRPCErrors   bool                   `yaml:"return_only_grpc_errors" json:"return_only_grpc_errors" category:"deprecated"`
-	FailingPercentage      uint64                 `yaml:"failing_percentage" json:"failing_percentage" category:"experimental"`
-	FailingIngesters       flagext.StringSliceCSV `yaml:"failing_ingesters" json:"ffailing_ingesters" category:"experimental"`
-	FailingStatus          string                 `yaml:"failing_status" json:"failing_status" category:"experimental"`
-	FailingConcurrentCalls uint64                 `yaml:"failing_concurrent_calls" json:"failing_concurrent_calls" category:"experimental"`
+	DeprecatedReturnOnlyGRPCErrors bool                   `yaml:"return_only_grpc_errors" json:"return_only_grpc_errors" category:"deprecated"`
+	FailingPercentage              uint64                 `yaml:"failing_percentage" json:"failing_percentage" category:"experimental"`
+	FailingIngesters               flagext.StringSliceCSV `yaml:"failing_ingesters" json:"ffailing_ingesters" category:"experimental"`
+	FailingStatus                  string                 `yaml:"failing_status" json:"failing_status" category:"experimental"`
+	FailingConcurrentCalls         uint64                 `yaml:"failing_concurrent_calls" json:"failing_concurrent_calls" category:"experimental"`
 
 	UseIngesterOwnedSeriesForLimits bool          `yaml:"use_ingester_owned_series_for_limits" category:"experimental"`
 	UpdateIngesterOwnedSeries       bool          `yaml:"track_ingester_owned_series" category:"experimental"`
