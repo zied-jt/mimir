@@ -10,10 +10,13 @@ import (
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/ring"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/grafana/mimir/pkg/mimirpb"
 )
 
 const (
@@ -70,7 +73,7 @@ func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics
 			transitionHalfOpen.Inc()
 			level.Info(logger).Log("msg", "circuit breaker is half-open", "ingester", inst.Id, "previous", event.OldState, "current", event.NewState)
 		}).
-		HandleIf(func(r any, err error) bool { return isFailure(err) }).
+		HandleIf(func(r any, err error) bool { return isFailure(err, cfg) }).
 		Build()
 
 	executor := failsafe.NewExecutor[any](breaker)
@@ -93,7 +96,7 @@ func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics
 	}
 }
 
-func isFailure(err error) bool {
+func isFailure(err error, cfg CircuitBreakerConfig) bool {
 	if err == nil {
 		return false
 	}
@@ -101,6 +104,23 @@ func isFailure(err error) bool {
 	// We only consider timeouts or the ingester being unavailable (returned when hitting
 	// per-instance limits) to be errors worthy of tripping the circuit breaker since these
 	// are specific to a particular ingester, not a user or request.
-	code := status.Code(err)
-	return code == codes.Unavailable || code == codes.DeadlineExceeded
+	if !cfg.InstanceLimitCheckEnabled {
+		code := status.Code(err)
+		return code == codes.Unavailable || code == codes.DeadlineExceeded
+	}
+
+	if stat, ok := grpcutil.ErrorToStatus(err); ok {
+		if stat.Code() == codes.DeadlineExceeded {
+			return true
+		}
+		details := stat.Details()
+		if len(details) != 1 {
+			return false
+		}
+		if errDetails, ok := details[0].(*mimirpb.ErrorDetails); ok {
+			return errDetails.GetCause() == mimirpb.INSTANCE_LIMIT
+		}
+	}
+
+	return false
 }

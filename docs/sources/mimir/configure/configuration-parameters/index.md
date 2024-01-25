@@ -2363,6 +2363,10 @@ circuit_breaker:
   # CLI flag: -ingester.client.circuit-breaker.cooldown-period
   [cooldown_period: <duration> | default = 1m]
 
+  # (experimental) Enable instance limit check only
+  # CLI flag: -ingester.client.circuit-breaker.instance-limit-check-enabled
+  [instance_limit_check_enabled: <boolean> | default = false]
+
 # (deprecated) If set to true, gRPC status codes will be reported in
 # "status_code" label of "cortex_ingester_client_request_duration_seconds"
 # metric. Otherwise, they will be reported as "error"

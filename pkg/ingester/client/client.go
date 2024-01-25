@@ -109,6 +109,7 @@ type CircuitBreakerConfig struct {
 	FailureExecutionThreshold uint          `yaml:"failure_execution_threshold" category:"experimental"`
 	ThresholdingPeriod        time.Duration `yaml:"thresholding_period" category:"experimental"`
 	CooldownPeriod            time.Duration `yaml:"cooldown_period" category:"experimental"`
+	InstanceLimitCheckEnabled bool          `yaml:"instance_limit_check_enabled" category:"experimental"`
 }
 
 func (cfg *CircuitBreakerConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
@@ -117,6 +118,7 @@ func (cfg *CircuitBreakerConfig) RegisterFlagsWithPrefix(prefix string, f *flag.
 	f.UintVar(&cfg.FailureExecutionThreshold, prefix+".circuit-breaker.failure-execution-threshold", 100, "How many requests must have been executed in period for the circuit breaker to be eligible to open for the rate of failures")
 	f.DurationVar(&cfg.ThresholdingPeriod, prefix+".circuit-breaker.thresholding-period", time.Minute, "Moving window of time that the percentage of failed requests is computed over")
 	f.DurationVar(&cfg.CooldownPeriod, prefix+".circuit-breaker.cooldown-period", time.Minute, "How long the circuit breaker will stay in the open state before allowing some requests")
+	f.BoolVar(&cfg.InstanceLimitCheckEnabled, prefix+".circuit-breaker.instance-limit-check-enabled", false, "Enable instance limit check only")
 }
 
 func (cfg *CircuitBreakerConfig) Validate() error {

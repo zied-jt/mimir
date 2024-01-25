@@ -2261,6 +2261,17 @@
               "fieldFlag": "ingester.client.circuit-breaker.cooldown-period",
               "fieldType": "duration",
               "fieldCategory": "experimental"
+            },
+            {
+              "kind": "field",
+              "name": "instance_limit_check_enabled",
+              "required": false,
+              "desc": "Enable instance limit check only",
+              "fieldValue": null,
+              "fieldDefaultValue": false,
+              "fieldFlag": "ingester.client.circuit-breaker.instance-limit-check-enabled",
+              "fieldType": "boolean",
+              "fieldCategory": "experimental"
             }
           ],
           "fieldValue": null,

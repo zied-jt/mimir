@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gogo/status"
+
+	"github.com/grafana/mimir/pkg/mimirpb"
+
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/grafana/dskit/ring"
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,37 +20,47 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/grafana/mimir/pkg/util/test"
 )
 
 func TestIsFailure(t *testing.T) {
+	cfg := CircuitBreakerConfig{}
 	t.Run("no error", func(t *testing.T) {
-		require.False(t, isFailure(nil))
+		require.False(t, isFailure(nil, cfg))
 	})
 
 	t.Run("context cancelled", func(t *testing.T) {
-		require.False(t, isFailure(context.Canceled))
-		require.False(t, isFailure(fmt.Errorf("%w", context.Canceled)))
+		require.False(t, isFailure(context.Canceled, cfg))
+		require.False(t, isFailure(fmt.Errorf("%w", context.Canceled), cfg))
 	})
 
 	t.Run("gRPC context cancelled", func(t *testing.T) {
 		err := status.Error(codes.Canceled, "cancelled!")
-		require.False(t, isFailure(err))
-		require.False(t, isFailure(fmt.Errorf("%w", err)))
+		require.False(t, isFailure(err, cfg))
+		require.False(t, isFailure(fmt.Errorf("%w", err), cfg))
 	})
 
 	t.Run("gRPC deadline exceeded", func(t *testing.T) {
 		err := status.Error(codes.DeadlineExceeded, "broken!")
-		require.True(t, isFailure(err))
-		require.True(t, isFailure(fmt.Errorf("%w", err)))
+		require.True(t, isFailure(err, cfg))
+		require.True(t, isFailure(fmt.Errorf("%w", err), cfg))
 	})
 
 	t.Run("gRPC unavailable", func(t *testing.T) {
 		err := status.Error(codes.Unavailable, "broken!")
-		require.True(t, isFailure(err))
-		require.True(t, isFailure(fmt.Errorf("%w", err)))
+		require.True(t, isFailure(err, cfg))
+		require.True(t, isFailure(fmt.Errorf("%w", err), cfg))
+	})
+
+	cfg.InstanceLimitCheckEnabled = true
+	t.Run("gRPC unavailable", func(t *testing.T) {
+		stat := status.New(codes.Unavailable, "broken!")
+		stat, err := stat.WithDetails(&mimirpb.ErrorDetails{Cause: mimirpb.INSTANCE_LIMIT})
+		require.NoError(t, err)
+		err = stat.Err()
+		require.True(t, isFailure(err, cfg))
+		require.True(t, isFailure(fmt.Errorf("%w", err), cfg))
 	})
 }
 
