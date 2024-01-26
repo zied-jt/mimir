@@ -148,6 +148,24 @@ func (i *ActivityTrackerWrapper) FlushHandler(w http.ResponseWriter, r *http.Req
 	i.ing.FlushHandler(w, r)
 }
 
+func (i *ActivityTrackerWrapper) DeadlineExceededEnabledHandler(w http.ResponseWriter, r *http.Request) {
+	ix := i.tracker.Insert(func() string {
+		return requestActivity(r.Context(), "Ingester/DeadlineExceededEnabledHandler", nil)
+	})
+	defer i.tracker.Delete(ix)
+
+	i.ing.DeadlineExceededEnabledHandler(w, r)
+}
+
+func (i *ActivityTrackerWrapper) DeadlineExceededDisabledHandler(w http.ResponseWriter, r *http.Request) {
+	ix := i.tracker.Insert(func() string {
+		return requestActivity(r.Context(), "Ingester/DeadlineExceededDisabledHandler", nil)
+	})
+	defer i.tracker.Delete(ix)
+
+	i.ing.DeadlineExceededDisabledHandler(w, r)
+}
+
 func (i *ActivityTrackerWrapper) PrepareShutdownHandler(w http.ResponseWriter, r *http.Request) {
 	ix := i.tracker.Insert(func() string {
 		return requestActivity(r.Context(), "Ingester/PrepareShutdownHandler", nil)

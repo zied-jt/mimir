@@ -283,6 +283,8 @@ type Ingester interface {
 	UserRegistryHandler(http.ResponseWriter, *http.Request)
 	TenantsHandler(http.ResponseWriter, *http.Request)
 	TenantTSDBHandler(http.ResponseWriter, *http.Request)
+	DeadlineExceededEnabledHandler(http.ResponseWriter, *http.Request)
+	DeadlineExceededDisabledHandler(http.ResponseWriter, *http.Request)
 }
 
 // RegisterIngester registers the ingester HTTP and gRPC services.
@@ -298,6 +300,9 @@ func (a *API) RegisterIngester(i Ingester) {
 	a.RegisterRoute("/ingester/prepare-shutdown", http.HandlerFunc(i.PrepareShutdownHandler), false, true, "GET", "POST", "DELETE")
 	a.RegisterRoute("/ingester/shutdown", http.HandlerFunc(i.ShutdownHandler), false, true, "GET", "POST")
 	a.RegisterRoute("/ingester/tsdb_metrics", http.HandlerFunc(i.UserRegistryHandler), true, true, "GET")
+
+	a.RegisterRoute("/ingester/deadline-exceeded-enabled", http.HandlerFunc(i.DeadlineExceededEnabledHandler), false, true, "GET", "POST")
+	a.RegisterRoute("/ingester/deadline-exceeded-disabled", http.HandlerFunc(i.DeadlineExceededDisabledHandler), false, true, "GET", "POST")
 
 	a.indexPage.AddLinks(defaultWeight, "Ingester", []IndexPageLink{
 		{Dangerous: true, Desc: "Ingester Tenants", Path: "/ingester/tenants"},

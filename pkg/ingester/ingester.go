@@ -327,6 +327,8 @@ type Ingester struct {
 	errorSamplers ingesterErrSamplers
 
 	ingestReader *ingest.PartitionReader
+
+	deadlineExceededEnabled atomic.Bool
 }
 
 func newIngester(cfg Config, limits *validation.Overrides, registerer prometheus.Registerer, logger log.Logger) (*Ingester, error) {
@@ -3392,26 +3394,47 @@ func (i *Ingester) slowDown(userID string, duration time.Duration) {
 	level.Error(i.logger).Log("msg", "slept for 5s and will continue", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
 }
 
+func (i *Ingester) DeadlineExceededEnabledHandler(w http.ResponseWriter, _ *http.Request) {
+	i.deadlineExceededEnabled.Store(true)
+	level.Info(i.logger).Log("msg", "DeadlineExceededEnabledHandler has been invoked")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (i *Ingester) DeadlineExceededDisabledHandler(w http.ResponseWriter, _ *http.Request) {
+	i.deadlineExceededEnabled.Store(false)
+	level.Info(i.logger).Log("msg", "DeadlineExceededDisabledHandler has been invoked")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Push implements client.IngesterServer
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	if i.cfg.FailingPercentage > 0 && i.cfg.FailingPercentage <= 100 {
-		if slices.Contains(i.cfg.FailingIngesters, i.cfg.IngesterRing.InstanceID) {
-			userID, err := tenant.TenantID(ctx)
-			if err != nil {
-				return nil, err
-			}
-			pivot := uint64(rand.Intn(100))
-			q := 100 / i.cfg.FailingPercentage
-			if pivot%q == 0 {
-				if i.cfg.FailingStatus == "DeadlineExceeded" {
-					i.slowDown(userID, 5*time.Second)
-				} else if i.cfg.FailingStatus == "Unavailable" {
-					level.Error(i.logger).Log("msg", "this ingester is currently unavailable", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
-					return nil, newErrorWithStatus(newUnavailableError(services.Stopping), codes.Unavailable)
+	if i.deadlineExceededEnabled.Load() {
+		userID, err := tenant.TenantID(ctx)
+		if err != nil {
+			return nil, err
+		}
+		i.slowDown(userID, 5*time.Second)
+	} else {
+		if i.cfg.FailingPercentage > 0 && i.cfg.FailingPercentage <= 100 {
+			if slices.Contains(i.cfg.FailingIngesters, i.cfg.IngesterRing.InstanceID) {
+				userID, err := tenant.TenantID(ctx)
+				if err != nil {
+					return nil, err
+				}
+				pivot := uint64(rand.Intn(100))
+				q := 100 / i.cfg.FailingPercentage
+				if pivot%q == 0 {
+					if i.cfg.FailingStatus == "DeadlineExceeded" {
+						i.slowDown(userID, 5*time.Second)
+					} else if i.cfg.FailingStatus == "Unavailable" {
+						level.Error(i.logger).Log("msg", "this ingester is currently unavailable", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
+						return nil, newErrorWithStatus(newUnavailableError(services.Stopping), codes.Unavailable)
+					}
 				}
 			}
 		}
 	}
+
 	err := i.PushWithCleanup(ctx, req, func() { mimirpb.ReuseSlice(req.Timeseries) })
 	if err == nil {
 		return &mimirpb.WriteResponse{}, nil
