@@ -2266,10 +2266,32 @@
               "kind": "field",
               "name": "instance_limit_check_enabled",
               "required": false,
-              "desc": "Enable instance limit check only",
+              "desc": "Enable instance limit check",
               "fieldValue": null,
               "fieldDefaultValue": false,
               "fieldFlag": "ingester.client.circuit-breaker.instance-limit-check-enabled",
+              "fieldType": "boolean",
+              "fieldCategory": "experimental"
+            },
+            {
+              "kind": "field",
+              "name": "unavailable_check_enabled",
+              "required": false,
+              "desc": "Enable unavailable check",
+              "fieldValue": null,
+              "fieldDefaultValue": false,
+              "fieldFlag": "ingester.client.circuit-breaker.unavailable-check-enabled",
+              "fieldType": "boolean",
+              "fieldCategory": "experimental"
+            },
+            {
+              "kind": "field",
+              "name": "deadline_exceeded_check_enabled",
+              "required": false,
+              "desc": "Enable deadline exceeded check",
+              "fieldValue": null,
+              "fieldDefaultValue": false,
+              "fieldFlag": "ingester.client.circuit-breaker.deadline-exceeded-check-enabled",
               "fieldType": "boolean",
               "fieldCategory": "experimental"
             }

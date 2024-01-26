@@ -25,7 +25,11 @@ import (
 )
 
 func TestIsFailure(t *testing.T) {
-	cfg := CircuitBreakerConfig{}
+	cfg := CircuitBreakerConfig{
+		InstanceLimitCheckEnabled:    false,
+		UnavailableCheckEnabled:      true,
+		DeadlineExceededCheckEnabled: true,
+	}
 	t.Run("no error", func(t *testing.T) {
 		require.False(t, isFailure(nil, cfg))
 	})
@@ -54,6 +58,7 @@ func TestIsFailure(t *testing.T) {
 	})
 
 	cfg.InstanceLimitCheckEnabled = true
+	cfg.UnavailableCheckEnabled = false
 	t.Run("gRPC unavailable", func(t *testing.T) {
 		stat := status.New(codes.Unavailable, "broken!")
 		stat, err := stat.WithDetails(&mimirpb.ErrorDetails{Cause: mimirpb.INSTANCE_LIMIT})
@@ -79,11 +84,14 @@ func TestNewCircuitBreaker(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
 	inst := ring.InstanceDesc{Id: "test", Addr: "localhost:8080"}
 	breaker := NewCircuitBreaker(inst, CircuitBreakerConfig{
-		Enabled:                   true,
-		FailureThreshold:          1,
-		FailureExecutionThreshold: 1,
-		ThresholdingPeriod:        60 * time.Second,
-		CooldownPeriod:            60 * time.Second,
+		Enabled:                      true,
+		FailureThreshold:             1,
+		FailureExecutionThreshold:    1,
+		ThresholdingPeriod:           60 * time.Second,
+		CooldownPeriod:               60 * time.Second,
+		InstanceLimitCheckEnabled:    false,
+		UnavailableCheckEnabled:      true,
+		DeadlineExceededCheckEnabled: true,
 	}, NewMetrics(reg), test.NewTestingLogger(t))
 
 	// Initial request that should succeed because the circuit breaker is "closed"

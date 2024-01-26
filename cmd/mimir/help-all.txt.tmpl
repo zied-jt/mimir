@@ -1273,6 +1273,8 @@ Usage of ./cmd/mimir/mimir:
     	Number of times to backoff and retry before failing. (default 10)
   -ingester.client.circuit-breaker.cooldown-period duration
     	[experimental] How long the circuit breaker will stay in the open state before allowing some requests (default 1m0s)
+  -ingester.client.circuit-breaker.deadline-exceeded-check-enabled
+    	[experimental] Enable deadline exceeded check
   -ingester.client.circuit-breaker.enabled
     	[experimental] Enable circuit breaking when making requests to ingesters
   -ingester.client.circuit-breaker.failure-execution-threshold uint
@@ -1280,9 +1282,11 @@ Usage of ./cmd/mimir/mimir:
   -ingester.client.circuit-breaker.failure-threshold uint
     	[experimental] Max percentage of requests that can fail over period before the circuit breaker opens (default 10)
   -ingester.client.circuit-breaker.instance-limit-check-enabled
-    	[experimental] Enable instance limit check only
+    	[experimental] Enable instance limit check
   -ingester.client.circuit-breaker.thresholding-period duration
     	[experimental] Moving window of time that the percentage of failed requests is computed over (default 1m0s)
+  -ingester.client.circuit-breaker.unavailable-check-enabled
+    	[experimental] Enable unavailable check
   -ingester.client.connect-backoff-base-delay duration
     	Initial backoff delay after first connection failure. Only relevant if ConnectTimeout > 0. (default 1s)
   -ingester.client.connect-backoff-max-delay duration

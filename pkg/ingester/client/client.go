@@ -104,12 +104,14 @@ func (cfg *Config) Validate(logger log.Logger) error {
 }
 
 type CircuitBreakerConfig struct {
-	Enabled                   bool          `yaml:"enabled" category:"experimental"`
-	FailureThreshold          uint          `yaml:"failure_threshold" category:"experimental"`
-	FailureExecutionThreshold uint          `yaml:"failure_execution_threshold" category:"experimental"`
-	ThresholdingPeriod        time.Duration `yaml:"thresholding_period" category:"experimental"`
-	CooldownPeriod            time.Duration `yaml:"cooldown_period" category:"experimental"`
-	InstanceLimitCheckEnabled bool          `yaml:"instance_limit_check_enabled" category:"experimental"`
+	Enabled                      bool          `yaml:"enabled" category:"experimental"`
+	FailureThreshold             uint          `yaml:"failure_threshold" category:"experimental"`
+	FailureExecutionThreshold    uint          `yaml:"failure_execution_threshold" category:"experimental"`
+	ThresholdingPeriod           time.Duration `yaml:"thresholding_period" category:"experimental"`
+	CooldownPeriod               time.Duration `yaml:"cooldown_period" category:"experimental"`
+	InstanceLimitCheckEnabled    bool          `yaml:"instance_limit_check_enabled" category:"experimental"`
+	UnavailableCheckEnabled      bool          `yaml:"unavailable_check_enabled" category:"experimental"`
+	DeadlineExceededCheckEnabled bool          `yaml:"deadline_exceeded_check_enabled" category:"experimental"`
 }
 
 func (cfg *CircuitBreakerConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
@@ -118,7 +120,9 @@ func (cfg *CircuitBreakerConfig) RegisterFlagsWithPrefix(prefix string, f *flag.
 	f.UintVar(&cfg.FailureExecutionThreshold, prefix+".circuit-breaker.failure-execution-threshold", 100, "How many requests must have been executed in period for the circuit breaker to be eligible to open for the rate of failures")
 	f.DurationVar(&cfg.ThresholdingPeriod, prefix+".circuit-breaker.thresholding-period", time.Minute, "Moving window of time that the percentage of failed requests is computed over")
 	f.DurationVar(&cfg.CooldownPeriod, prefix+".circuit-breaker.cooldown-period", time.Minute, "How long the circuit breaker will stay in the open state before allowing some requests")
-	f.BoolVar(&cfg.InstanceLimitCheckEnabled, prefix+".circuit-breaker.instance-limit-check-enabled", false, "Enable instance limit check only")
+	f.BoolVar(&cfg.InstanceLimitCheckEnabled, prefix+".circuit-breaker.instance-limit-check-enabled", false, "Enable instance limit check")
+	f.BoolVar(&cfg.UnavailableCheckEnabled, prefix+".circuit-breaker.unavailable-check-enabled", false, "Enable unavailable check")
+	f.BoolVar(&cfg.DeadlineExceededCheckEnabled, prefix+".circuit-breaker.deadline-exceeded-check-enabled", false, "Enable deadline exceeded check")
 }
 
 func (cfg *CircuitBreakerConfig) Validate() error {

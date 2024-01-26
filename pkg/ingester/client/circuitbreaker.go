@@ -14,7 +14,6 @@ import (
 	"github.com/grafana/dskit/ring"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 )
@@ -101,18 +100,20 @@ func isFailure(err error, cfg CircuitBreakerConfig) bool {
 		return false
 	}
 
-	// We only consider timeouts or the ingester being unavailable (returned when hitting
-	// per-instance limits) to be errors worthy of tripping the circuit breaker since these
-	// are specific to a particular ingester, not a user or request.
-	if !cfg.InstanceLimitCheckEnabled {
-		code := status.Code(err)
-		return code == codes.Unavailable || code == codes.DeadlineExceeded
+	stat, ok := grpcutil.ErrorToStatus(err)
+	if !ok {
+		return false
+	}
+	code := stat.Code()
+	if cfg.UnavailableCheckEnabled && code == codes.Unavailable {
+		return true
 	}
 
-	if stat, ok := grpcutil.ErrorToStatus(err); ok {
-		if stat.Code() == codes.DeadlineExceeded {
-			return true
-		}
+	if cfg.DeadlineExceededCheckEnabled && code == codes.DeadlineExceeded {
+		return true
+	}
+
+	if cfg.InstanceLimitCheckEnabled {
 		details := stat.Details()
 		if len(details) != 1 {
 			return false
