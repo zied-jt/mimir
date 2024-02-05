@@ -7,6 +7,7 @@
 package alertmanager
 
 import (
+	"fmt"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/alertmanager/matchers/compat"
@@ -34,26 +35,26 @@ type matchersInhibitionRule struct {
 	TargetMatchers []string `yaml:"target_matchers,omitempty" json:"target_matchers,omitempty"`
 }
 
-// validateMatchersInConfigDesc validates that a configuration is forwards compatible with the
+// checkMatchersInConfigDesc checks if a configuration is forwards compatible with the
 // UTF-8 matchers parser (matchers/parse). It does so via loading the same configuration a second
 // time but instead via the fallback parser which emits logs and metrics about incompatible inputs
 // and disagreement. If no incompatible inputs or disagreement are found, then the Alertmanager
 // can be switched to the UTF-8 strict mode. Otherwise, configurations should be fixed before
 // enabling the mode.
-func validateMatchersInConfigDesc(logger log.Logger, metrics *compat.Metrics, origin string, cfg alertspb.AlertConfigDesc) {
+func checkMatchersInConfigDesc(logger log.Logger, metrics *compat.Metrics, origin string, cfg alertspb.AlertConfigDesc) {
 	// Do not add origin to the logger as it's added in the compat package.
 	logger = log.With(logger, "user", cfg.User)
 	parseFn := compat.FallbackMatchersParser(logger, metrics)
 	matchersCfg := matchersConfig{}
 	if err := yaml.Unmarshal([]byte(cfg.RawConfig), &matchersCfg); err != nil {
-		level.Warn(logger).Log("msg", "Failed to load configuration in validateMatchersInConfigDesc", "origin", origin, "err", err)
+		level.Warn(logger).Log("msg", "Failed to load configuration in checkMatchersInConfigDesc", "origin", origin, "err", err)
 		return
 	}
-	validateRoute(logger, parseFn, origin, matchersCfg.Route, cfg.User)
-	validateInhibitionRules(logger, parseFn, origin, matchersCfg.InhibitRules, cfg.User)
+	checkRoute(logger, parseFn, origin, matchersCfg.Route, cfg.User)
+	checkInhibitionRules(logger, parseFn, origin, matchersCfg.InhibitRules, cfg.User)
 }
 
-func validateRoute(logger log.Logger, parseFn compat.ParseMatchers, origin string, r *matchersRoute, user string) {
+func checkRoute(logger log.Logger, parseFn compat.ParseMatchers, origin string, r *matchersRoute, user string) {
 	if r == nil {
 		// This shouldn't be possible, but if somehow a tenant does have a nil route this prevents
 		// a nil pointer dereference and a subsequent panic.
@@ -71,11 +72,11 @@ func validateRoute(logger log.Logger, parseFn compat.ParseMatchers, origin strin
 		}
 	}
 	for _, route := range r.Routes {
-		validateRoute(logger, parseFn, origin, route, user)
+		checkRoute(logger, parseFn, origin, route, user)
 	}
 }
 
-func validateInhibitionRules(logger log.Logger, parseFn compat.ParseMatchers, origin string, rules []*matchersInhibitionRule, _ string) {
+func checkInhibitionRules(logger log.Logger, parseFn compat.ParseMatchers, origin string, rules []*matchersInhibitionRule, _ string) {
 	for _, r := range rules {
 		for _, m := range r.SourceMatchers {
 			if _, err := parseFn(m, origin); err != nil {
@@ -90,4 +91,56 @@ func validateInhibitionRules(logger log.Logger, parseFn compat.ParseMatchers, or
 			}
 		}
 	}
+}
+
+func enforceMatchersInConfigDesc(logger log.Logger, metrics *compat.Metrics, origin string, cfg alertspb.AlertConfigDesc) error {
+	// Do not add origin to the logger as it's added in the compat package.
+	logger = log.With(logger, "user", cfg.User)
+	parseFn := compat.UTF8MatchersParser(logger, metrics)
+	matchersCfg := matchersConfig{}
+	if err := yaml.Unmarshal([]byte(cfg.RawConfig), &matchersCfg); err != nil {
+		return err
+	}
+	if err := enforceRoute(logger, parseFn, origin, matchersCfg.Route, cfg.User); err != nil {
+		return err
+	}
+	if err := enforceInhibitionRules(logger, parseFn, origin, matchersCfg.InhibitRules, cfg.User); err != nil {
+		return err
+	}
+	return nil
+}
+
+func enforceRoute(logger log.Logger, parseFn compat.ParseMatchers, origin string, r *matchersRoute, user string) error {
+	if r == nil {
+		// This shouldn't be possible, but if somehow a tenant does have a nil route this prevents
+		// a nil pointer dereference and a subsequent panic.
+		return nil
+	}
+	for _, m := range r.Matchers {
+		if _, err := parseFn(m, origin); err != nil {
+			return fmt.Errorf("Invalid matcher %s in route: %s", m, err)
+		}
+	}
+	for _, route := range r.Routes {
+		if err := enforceRoute(logger, parseFn, origin, route, user); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enforceInhibitionRules(_ log.Logger, parseFn compat.ParseMatchers, origin string, rules []*matchersInhibitionRule, _ string) error {
+	for _, r := range rules {
+		for _, m := range r.SourceMatchers {
+			if _, err := parseFn(m, origin); err != nil {
+				return fmt.Errorf("Invalid matcher %s in inhibition rule source matchers: %s", m, err)
+			}
+		}
+		for _, m := range r.TargetMatchers {
+			if _, err := parseFn(m, origin); err != nil {
+				return fmt.Errorf("Invalid matcher %s in inhibition rule target matchers: %s", m, err)
+			}
+		}
+	}
+	return nil
 }

@@ -110,7 +110,7 @@ inhibit_rules:
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			m := compat.NewMetrics(prometheus.NewRegistry())
-			validateMatchersInConfigDesc(log.NewNopLogger(), m, "test", test.config)
+			checkMatchersInConfigDesc(log.NewNopLogger(), m, "test", test.config)
 			requireMetric(t, test.total, m.Total)
 			requireMetric(t, test.disagreeTotal, m.DisagreeTotal)
 			requireMetric(t, test.incompatibleTotal, m.IncompatibleTotal)
