@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/gorilla/mux"
 	"github.com/grafana/dskit/concurrency"
 	"github.com/grafana/dskit/kv"
 	"github.com/grafana/dskit/middleware"
@@ -349,6 +350,8 @@ type Ingester struct {
 	ingestReader              *ingest.PartitionReader
 	ingestPartitionID         int32
 	ingestPartitionLifecycler *ring.PartitionInstanceLifecycler
+
+	deadlineExceededEnabled atomic.Bool
 }
 
 func newIngester(cfg Config, limits *validation.Overrides, registerer prometheus.Registerer, logger log.Logger) (*Ingester, error) {
@@ -3695,8 +3698,42 @@ func (i *Ingester) checkAvailableForPush() error {
 	return newUnavailableError(ingesterState)
 }
 
+func (i *Ingester) DeadlineExceededHandler(w http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	durationArg := vars["duration"]
+	var (
+		duration time.Duration
+		err      error
+	)
+	if durationArg == "" {
+		util.WriteTextResponse(w, "DeadlineExceededHandler duration can't be empty")
+		level.Info(i.logger).Log("msg", "DeadlineExceededHandler: duration has not been specified, so the default duration of 10s will be used", "ingester", i.cfg.IngesterRing.InstanceID)
+		duration = 10 * time.Second
+	} else {
+		duration, err = time.ParseDuration(durationArg)
+		if err != nil {
+			msg := fmt.Sprintf("DeadlineExceededHandler: invalid duration '%s' has been specified, so the default duration of 10s will be used", durationArg)
+			level.Info(i.logger).Log("msg", msg, "ingester", i.cfg.IngesterRing.InstanceID)
+		}
+	}
+	i.deadlineExceededEnabled.Store(true)
+	level.Info(i.logger).Log("msg", "DeadlineExceededHandler: started producing DeadlineExceeded errors", "ingester", i.cfg.IngesterRing.InstanceID)
+	time.Sleep(duration)
+	i.deadlineExceededEnabled.Store(false)
+	level.Info(i.logger).Log("msg", "DeadlineExceededHandler: stopped producing DeadlineExceeded errors", "ingester", i.cfg.IngesterRing.InstanceID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // PushToStorage implements ingest.Pusher interface for ingestion via ingest-storage.
 func (i *Ingester) PushToStorage(ctx context.Context, req *mimirpb.WriteRequest) error {
+	if i.deadlineExceededEnabled.Load() {
+		userID, err := tenant.TenantID(ctx)
+		if err != nil {
+			return err
+		}
+		time.Sleep(5 * time.Second)
+		level.Error(i.logger).Log("msg", "slept for 5s and will continue", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
+	}
 	err := i.PushWithCleanup(ctx, req, func() { mimirpb.ReuseSlice(req.Timeseries) })
 	if err != nil {
 		return i.mapPushErrorToErrorWithStatus(err)
