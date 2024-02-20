@@ -143,3 +143,84 @@ func TestOOOIngestion(t *testing.T) {
 	require.Equal(t, model.ValMatrix, rangeResult.Type())
 	require.Equal(t, expectedMatrix, rangeResult.(model.Matrix))
 }
+
+func TestOOOHistogramIngestionDisabled(t *testing.T) {
+	t.Helper()
+
+	s, err := e2e.NewScenario(networkName)
+	require.NoError(t, err)
+	defer s.Close()
+
+	// Start dependencies.
+	minio := e2edb.NewMinio(9000, blocksBucketName)
+	require.NoError(t, s.StartAndWaitReady(minio))
+
+	// Start Mimir components.
+	require.NoError(t, copyFileToSharedDir(s, "docs/configurations/single-process-config-blocks.yaml", mimirConfigFile))
+
+	// Start Mimir in single binary mode, reading the config from file and overwriting
+	// the backend config to make it work with Minio.
+	flags := mergeFlags(
+		DefaultSingleBinaryFlags(),
+		BlocksStorageFlags(),
+		BlocksStorageS3Flags(),
+		map[string]string{
+			"-ingester.out-of-order-time-window":            "10m",
+			"-ingester.native-histograms-ingestion-enabled": "true",
+		},
+	)
+
+	mimir := e2emimir.NewSingleBinary("mimir-1", flags, e2emimir.WithConfigFile(mimirConfigFile), e2emimir.WithPorts(9009, 9095))
+	require.NoError(t, s.StartAndWaitReady(mimir))
+
+	c, err := e2emimir.NewClient(mimir.HTTPEndpoint(), mimir.HTTPEndpoint(), "", "", "user-1")
+	require.NoError(t, err)
+
+	nowTS := time.Now()
+	oooTS := nowTS.Add(-time.Minute)
+
+	// Push float series.
+	floatSeriesName := "ooo_float_series"
+
+	// Push in-order sample.
+	series, _, _ := generateFloatSeries(floatSeriesName, nowTS)
+	res, err := c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	// Push out-of-order sample.
+	series, _, _ = generateFloatSeries(floatSeriesName, oooTS)
+	res, err = c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	// Push int histogram series.
+	intHistogramSeriesName := "ooo_int_histogram_series"
+
+	// Push in-order sample.
+	series, _, _ = generateHistogramSeries(intHistogramSeriesName, nowTS)
+	res, err = c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	// Push out-of-order sample.
+	series, _, _ = generateHistogramSeries(intHistogramSeriesName, oooTS)
+	res, err = c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, res.StatusCode) //FIXME: currently returning a 500
+
+	// Push float histogram series.
+	floatHistogramSeriesName := "ooo_float_histogram_series"
+
+	// Push in-order sample.
+	series, _, _ = GenerateFloatHistogramSeries(floatHistogramSeriesName, nowTS)
+	res, err = c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	// Push out-of-order sample.
+	series, _, _ = GenerateFloatHistogramSeries(floatHistogramSeriesName, oooTS)
+	res, err = c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, res.StatusCode) //FIXME: currently returning a 500
+}
