@@ -8,6 +8,7 @@ package batch
 import (
 	"container/heap"
 	"sort"
+	"sync/atomic"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
@@ -16,10 +17,14 @@ import (
 	"github.com/grafana/mimir/pkg/storage/chunk"
 )
 
+var MergeableBatchStreamEnabled atomic.Bool
+
 type mergeIterator struct {
 	its []*nonOverlappingIterator
 	h   iteratorHeap
 
+	// Store the current sorted batchStream
+	mBatches *mergeableBatchStream
 	// Store the current sorted batchStream
 	batches batchStream
 
@@ -35,7 +40,9 @@ type mergeIterator struct {
 func newMergeIterator(it iterator, cs []GenericChunk) *mergeIterator {
 	c, ok := it.(*mergeIterator)
 	if ok {
-		c.nextBatchBuf[0] = chunk.Batch{}
+		if !MergeableBatchStreamEnabled.Load() {
+			c.nextBatchBuf[0] = chunk.Batch{}
+		}
 		c.currErr = nil
 	} else {
 		c = &mergeIterator{}
@@ -47,15 +54,23 @@ func newMergeIterator(it iterator, cs []GenericChunk) *mergeIterator {
 	if cap(c.its) >= len(css) {
 		c.its = c.its[:len(css)]
 		c.h = c.h[:0]
-		c.batches = c.batches[:0]
-		// We are not resetting the content of c.batchesBuf because they will be
-		// reset once we call mergeStreams() on them.
-		c.batchesBuf = c.batchesBuf[:len(css)]
+		if MergeableBatchStreamEnabled.Load() {
+			c.mBatches.empty()
+		} else {
+			c.batches = c.batches[:0]
+			// We are not resetting the content of c.batchesBuf because they will be
+			// reset once we call mergeStreams() on them.
+			c.batchesBuf = c.batchesBuf[:len(css)]
+		}
 	} else {
 		c.its = make([]*nonOverlappingIterator, len(css))
 		c.h = make(iteratorHeap, 0, len(c.its))
-		c.batches = make(batchStream, 0, len(c.its))
-		c.batchesBuf = make(batchStream, len(c.its))
+		if MergeableBatchStreamEnabled.Load() {
+			c.mBatches = newBatchStream(len(c.its), &c.hPool, &c.fhPool)
+		} else {
+			c.batches = make(batchStream, 0, len(c.its))
+			c.batchesBuf = make(batchStream, len(c.its))
+		}
 	}
 	for i, cs := range css {
 		c.its[i] = newNonOverlappingIterator(c.its[i], cs, &c.hPool, &c.fhPool)
@@ -88,12 +103,38 @@ func (c *mergeIterator) putPointerValuesToThePool(b chunk.Batch) {
 	}
 }
 
+func (c *mergeIterator) currBatch() *chunk.Batch {
+	if MergeableBatchStreamEnabled.Load() {
+		return c.mBatches.curr()
+	}
+	return &c.batches[0]
+}
+
+func (c *mergeIterator) batchLen() int {
+	if MergeableBatchStreamEnabled.Load() {
+		return c.mBatches.len()
+	}
+	return len(c.batches)
+}
+
+func (c *mergeIterator) removeFirstBatch() {
+	if MergeableBatchStreamEnabled.Load() {
+		c.mBatches.removeFirst()
+	} else {
+		// Before we remove the first batch, we put pointers to its Histograms/FloatHistograms
+		// to the pool in order to reuse them.
+		c.putPointerValuesToThePool(c.batches[0])
+		copy(c.batches, c.batches[1:])
+		c.batches = c.batches[:len(c.batches)-1]
+	}
+}
+
 func (c *mergeIterator) Seek(t int64, size int) chunkenc.ValueType {
 
 	// Optimisation to see if the seek is within our current caches batches.
 found:
-	for len(c.batches) > 0 {
-		batch := &c.batches[0]
+	for c.batchLen() > 0 {
+		batch := c.currBatch()
 		if t >= batch.Timestamps[0] && t <= batch.Timestamps[batch.Length-1] {
 			batch.Index = 0
 			for batch.Index < batch.Length && t > batch.Timestamps[batch.Index] {
@@ -101,16 +142,13 @@ found:
 			}
 			break found
 		}
-		// The first batch is not needed anymore, so we put pointers to its Histograms/FloatHistograms
-		// to the pool in order to reuse them.
-		c.putPointerValuesToThePool(c.batches[0])
-		copy(c.batches, c.batches[1:])
-		c.batches = c.batches[:len(c.batches)-1]
+		// The first batch is not needed anymore, so we remove it.
+		c.removeFirstBatch()
 	}
 
 	// If we didn't find anything in the current set of batches, reset the heap
 	// and seek.
-	if len(c.batches) == 0 {
+	if c.batchLen() == 0 {
 		c.h = c.h[:0]
 		c.batches = c.batches[:0]
 
@@ -134,29 +172,31 @@ found:
 
 func (c *mergeIterator) Next(size int) chunkenc.ValueType {
 	// Pop the last built batch in a way that doesn't extend the slice.
-	if len(c.batches) > 0 {
-		// The first batch is not needed anymore, so we put pointers to its Histograms/FloatHistograms
-		// to the pool in order to reuse them.
-		c.putPointerValuesToThePool(c.batches[0])
-		copy(c.batches, c.batches[1:])
-		c.batches = c.batches[:len(c.batches)-1]
+	if c.batchLen() > 0 {
+		// The first batch is not needed anymore, so we remove it.
+		c.removeFirstBatch()
 	}
 
 	return c.buildNextBatch(size)
 }
 
 func (c *mergeIterator) nextBatchEndTime() int64 {
-	batch := &c.batches[0]
+	batch := c.currBatch()
 	return batch.Timestamps[batch.Length-1]
 }
 
 func (c *mergeIterator) buildNextBatch(size int) chunkenc.ValueType {
 	// All we need to do is get enough batches that our first batch's last entry
 	// is before all iterators next entry.
-	for len(c.h) > 0 && (len(c.batches) == 0 || c.nextBatchEndTime() >= c.h[0].AtTime()) {
-		c.nextBatchBuf[0] = c.h[0].Batch()
-		c.batchesBuf = mergeStreams(c.batches, c.nextBatchBuf[:], c.batchesBuf, size, &c.hPool, &c.fhPool)
-		c.batches = append(c.batches[:0], c.batchesBuf...)
+	for len(c.h) > 0 && (c.batchLen() == 0 || c.nextBatchEndTime() >= c.h[0].AtTime()) {
+		if MergeableBatchStreamEnabled.Load() {
+			batch := c.h[0].Batch()
+			c.mBatches.merge(&batch, size)
+		} else {
+			c.nextBatchBuf[0] = c.h[0].Batch()
+			c.batchesBuf = mergeStreams(c.batches, c.nextBatchBuf[:], c.batchesBuf, size, &c.hPool, &c.fhPool)
+			c.batches = append(c.batches[:0], c.batchesBuf...)
+		}
 
 		if c.h[0].Next(size) != chunkenc.ValNone {
 			heap.Fix(&c.h, 0)
@@ -165,18 +205,18 @@ func (c *mergeIterator) buildNextBatch(size int) chunkenc.ValueType {
 		}
 	}
 
-	if len(c.batches) > 0 {
-		return c.batches[0].ValueType
+	if c.batchLen() > 0 {
+		return c.currBatch().ValueType
 	}
 	return chunkenc.ValNone
 }
 
 func (c *mergeIterator) AtTime() int64 {
-	return c.batches[0].Timestamps[0]
+	return c.currBatch().Timestamps[0]
 }
 
 func (c *mergeIterator) Batch() chunk.Batch {
-	return c.batches[0]
+	return *c.currBatch()
 }
 
 func (c *mergeIterator) Err() error {

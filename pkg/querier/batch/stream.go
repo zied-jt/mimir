@@ -15,7 +15,7 @@ import (
 	"github.com/grafana/mimir/pkg/storage/chunk"
 )
 
-// batchStream deals with iteratoring through multiple, non-overlapping batches,
+// simpleBatchStream deals with iteratoring through multiple, non-overlapping batches,
 // and building new slices of non-overlapping batches.  Designed to be used
 // without allocations.
 type batchStream []chunk.Batch
@@ -143,7 +143,7 @@ func mergeStreams(left, right, result batchStream, size int, hPool *zeropool.Poo
 	}
 
 	// This function adds all the samples from the provided
-	// batchStream into the result in the same order.
+	// simpleBatchStream into the result in the same order.
 	addToResult := func(bs batchStream) {
 		for t := bs.hasNext(); t != chunkenc.ValNone; t = bs.hasNext() {
 			populate(bs, t)
@@ -163,4 +163,181 @@ func mergeStreams(left, right, result batchStream, size int, hPool *zeropool.Poo
 	result = result[:resultLen]
 	result.reset()
 	return result
+}
+
+// batchStream deals with iteratoring through multiple, non-overlapping batches,
+// and building new slices of non-overlapping batches.  Designed to be used
+// without allocations.
+type mergeableBatchStream struct {
+	batches    []chunk.Batch
+	batchesBuf []chunk.Batch
+
+	hPool  *zeropool.Pool[*histogram.Histogram]
+	fhPool *zeropool.Pool[*histogram.FloatHistogram]
+}
+
+func newBatchStream(size int, hPool *zeropool.Pool[*histogram.Histogram], fhPool *zeropool.Pool[*histogram.FloatHistogram]) *mergeableBatchStream {
+	batches := make([]chunk.Batch, 0, size)
+	batchesBuf := make([]chunk.Batch, size)
+	return &mergeableBatchStream{
+		batches:    batches,
+		batchesBuf: batchesBuf,
+		hPool:      hPool,
+		fhPool:     fhPool,
+	}
+}
+
+func (bs *mergeableBatchStream) putPointerValuesToThePool(batch *chunk.Batch) {
+	if batch.ValueType == chunkenc.ValHistogram && bs.hPool != nil {
+		for i := 0; i < batch.Length; i++ {
+			bs.hPool.Put((*histogram.Histogram)(batch.PointerValues[i]))
+		}
+	} else if batch.ValueType == chunkenc.ValFloatHistogram && bs.fhPool != nil {
+		for i := 0; i < batch.Length; i++ {
+			bs.fhPool.Put((*histogram.FloatHistogram)(batch.PointerValues[i]))
+		}
+	}
+}
+
+func (bs *mergeableBatchStream) removeFirst() {
+	bs.putPointerValuesToThePool(bs.curr())
+	copy(bs.batches, bs.batches[1:])
+	bs.batches = bs.batches[:len(bs.batches)-1]
+}
+
+func (bs *mergeableBatchStream) empty() {
+	for i := range bs.batches {
+		bs.putPointerValuesToThePool(&bs.batches[i])
+	}
+	bs.batches = bs.batches[:0]
+}
+
+func (bs *mergeableBatchStream) len() int {
+	return len(bs.batches)
+}
+
+func (bs *mergeableBatchStream) reset() {
+	for i := range bs.batches {
+		bs.batches[i].Index = 0
+	}
+}
+
+func (bs *mergeableBatchStream) hasNext() chunkenc.ValueType {
+	if bs.len() > 0 {
+		return bs.curr().ValueType
+	}
+	return chunkenc.ValNone
+}
+
+func (bs *mergeableBatchStream) next() {
+	b := bs.curr()
+	b.Index++
+	if b.Index >= b.Length {
+		bs.batches = bs.batches[1:]
+	}
+}
+
+func (bs *mergeableBatchStream) curr() *chunk.Batch {
+	return &bs.batches[0]
+}
+
+// merge merges this streams of chunk.Batch objects and the given chunk.Batch of the same series over time.
+// Samples are simply merged by time when they are the same type (float/histogram/...), with the left stream taking precedence if the timestamps are equal.
+// When sample are different type, batches are not merged. In case of equal timestamps, histograms take precedence since they have more information.
+func (bs *mergeableBatchStream) merge(batch *chunk.Batch, size int) {
+	bs.batches = append(bs.batches[:0], bs.mergeStreams(batch, size)...)
+	bs.reset()
+}
+
+func (bs *mergeableBatchStream) mergeStreams(batch *chunk.Batch, size int) []chunk.Batch {
+	// Reset the Index and Length of existing batches.
+	for i := range bs.batchesBuf {
+		bs.batchesBuf[i].Index = 0
+		bs.batchesBuf[i].Length = 0
+	}
+
+	resultLen := 1 // Number of batches in the final result.
+	b := &bs.batchesBuf[0]
+
+	// Step to the next Batch in the result, create it if it does not exist
+	nextBatch := func(valueType chunkenc.ValueType) {
+		// The Index is the place at which new sample
+		// has to be appended, hence it tells the length.
+		b.Length = b.Index
+		resultLen++
+		if resultLen > len(bs.batchesBuf) {
+			// It is possible that result can grow longer
+			// then the one provided.
+			bs.batchesBuf = append(bs.batchesBuf, chunk.Batch{})
+		}
+		b = &bs.batchesBuf[resultLen-1]
+		b.ValueType = valueType
+	}
+
+	populate := func(batch *chunk.Batch, valueType chunkenc.ValueType) {
+		if b.Index == 0 {
+			// Starting to write this Batch, it is safe to set the value type
+			b.ValueType = valueType
+		} else if b.Index == size || b.ValueType != valueType {
+			// The batch reached its intended size or is of a different value type
+			// Add another batch to the result and use it for further appending.
+			nextBatch(valueType)
+		}
+
+		switch valueType {
+		case chunkenc.ValFloat:
+			b.Timestamps[b.Index], b.Values[b.Index] = batch.At()
+		case chunkenc.ValHistogram:
+			b.Timestamps[b.Index], b.PointerValues[b.Index] = batch.AtHistogram()
+		case chunkenc.ValFloatHistogram:
+			b.Timestamps[b.Index], b.PointerValues[b.Index] = batch.AtFloatHistogram()
+		}
+		b.Index++
+	}
+
+	for lt, rt := bs.hasNext(), batch.HasNext(); lt != chunkenc.ValNone && rt != chunkenc.ValNone; lt, rt = bs.hasNext(), batch.HasNext() {
+		t1, t2 := bs.curr().AtTime(), batch.AtTime()
+		if t1 < t2 {
+			populate(bs.curr(), lt)
+			bs.next()
+		} else if t1 > t2 {
+			populate(batch, rt)
+			batch.Next()
+		} else {
+			if (rt == chunkenc.ValHistogram || rt == chunkenc.ValFloatHistogram) && lt == chunkenc.ValFloat {
+				// Prefer histograms than floats. Take left side if both have histograms.
+				populate(batch, rt)
+			} else {
+				populate(bs.curr(), lt)
+				// if bs.hPool is not nil, we put there the discarded histogram.Histogram object from batch, so it can be reused.
+				if rt == chunkenc.ValHistogram && bs.hPool != nil {
+					_, h := batch.AtHistogram()
+					bs.hPool.Put((*histogram.Histogram)(h))
+				}
+				// if bs.fhPool is not nil, we put there the discarded histogram.FloatHistogram object from batch, so it can be reused.
+				if rt == chunkenc.ValFloatHistogram && bs.fhPool != nil {
+					_, fh := batch.AtFloatHistogram()
+					bs.fhPool.Put((*histogram.FloatHistogram)(fh))
+				}
+			}
+			bs.next()
+			batch.Next()
+		}
+	}
+
+	for t := bs.hasNext(); t != chunkenc.ValNone; t = bs.hasNext() {
+		populate(bs.curr(), t)
+		bs.next()
+	}
+
+	for t := batch.HasNext(); t != chunkenc.ValNone; t = batch.HasNext() {
+		populate(batch, t)
+		batch.Next()
+	}
+
+	// The Index is the place at which new sample
+	// has to be appended, hence it tells the length.
+	b.Length = b.Index
+
+	return bs.batchesBuf[:resultLen]
 }
