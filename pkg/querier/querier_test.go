@@ -557,6 +557,231 @@ func BenchmarkCompareQueryExecute(b *testing.B) {
 	}
 }
 
+func BenchmarkQueryExecuteMain(b *testing.B) {
+	var (
+		logger    = log.NewNopLogger()
+		queryStep = time.Second
+	)
+
+	var cfg Config
+	flagext.DefaultValues(&cfg)
+
+	limits := defaultLimitsConfig()
+	limits.QueryIngestersWithin = 0 // Always query ingesters in this test.
+	overrides, err := validation.NewOverrides(limits, nil)
+	require.NoError(b, err)
+
+	scenarios := []struct {
+		numChunks          int
+		numSamplesPerChunk int
+		duplicationFactor  int
+	}{
+		{numChunks: 1000, numSamplesPerChunk: 100, duplicationFactor: 1},
+		{numChunks: 1000, numSamplesPerChunk: 100, duplicationFactor: 3},
+	}
+
+	for _, scenario := range scenarios {
+		for _, encoding := range []chunk.Encoding{
+			chunk.PrometheusXorChunk,
+			chunk.PrometheusHistogramChunk,
+			chunk.PrometheusFloatHistogramChunk,
+		} {
+			name := fmt.Sprintf("duplication factor: %d encoding: %s", scenario.duplicationFactor, encoding)
+			queryStart := time.Now().Add(-time.Second * time.Duration(scenario.numChunks*scenario.numSamplesPerChunk))
+			queryEnd := time.Now()
+			chunks := createChunks(b, scenario.numChunks, scenario.numSamplesPerChunk, scenario.duplicationFactor, queryStart, queryStep, encoding)
+			// Mock distributor to return chunks that need merging.
+			batch.MergeableBatchStreamEnabled.Store(false)
+			batch.BadMergeableBatchStreamMergeEnabled.Store(false)
+			distributor := &mockDistributor{}
+			distributor.On("QueryStream", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
+				client.CombinedQueryStreamResponse{
+					Chunkseries: []client.TimeSeriesChunk{
+						{
+							Labels: []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "one"}, {Name: labels.InstanceName, Value: "foo"}},
+							Chunks: chunks,
+						},
+					},
+				},
+				nil)
+
+			engine := promql.NewEngine(promql.EngineOpts{
+				Logger:     logger,
+				MaxSamples: 1e6,
+				Timeout:    1 * time.Minute,
+			})
+
+			queryable, _, _ := New(cfg, overrides, distributor, nil, nil, logger, nil)
+			ctx := user.InjectOrgID(context.Background(), "user-1")
+
+			b.Run(name, func(b *testing.B) {
+				b.ReportAllocs()
+
+				for i := 0; i < b.N; i++ {
+					query, err := engine.NewRangeQuery(ctx, queryable, nil, `rate({__name__=~".+"}[10s])`, queryStart, queryEnd, queryStep)
+					require.NoError(b, err)
+
+					r := query.Exec(ctx)
+					m, err := r.Matrix()
+					require.NoError(b, err)
+
+					require.Equal(b, 1, m.Len())
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkQueryExecuteMerge(b *testing.B) {
+	var (
+		logger    = log.NewNopLogger()
+		queryStep = time.Second
+	)
+
+	var cfg Config
+	flagext.DefaultValues(&cfg)
+
+	limits := defaultLimitsConfig()
+	limits.QueryIngestersWithin = 0 // Always query ingesters in this test.
+	overrides, err := validation.NewOverrides(limits, nil)
+	require.NoError(b, err)
+
+	scenarios := []struct {
+		numChunks          int
+		numSamplesPerChunk int
+		duplicationFactor  int
+	}{
+		{numChunks: 1000, numSamplesPerChunk: 100, duplicationFactor: 1},
+		{numChunks: 1000, numSamplesPerChunk: 100, duplicationFactor: 3},
+	}
+
+	for _, scenario := range scenarios {
+		for _, encoding := range []chunk.Encoding{
+			chunk.PrometheusXorChunk,
+			chunk.PrometheusHistogramChunk,
+			chunk.PrometheusFloatHistogramChunk,
+		} {
+			name := fmt.Sprintf("duplication factor: %d encoding: %s", scenario.duplicationFactor, encoding)
+			queryStart := time.Now().Add(-time.Second * time.Duration(scenario.numChunks*scenario.numSamplesPerChunk))
+			queryEnd := time.Now()
+			chunks := createChunks(b, scenario.numChunks, scenario.numSamplesPerChunk, scenario.duplicationFactor, queryStart, queryStep, encoding)
+			// Mock distributor to return chunks that need merging.
+			batch.MergeableBatchStreamEnabled.Store(true)
+			batch.BadMergeableBatchStreamMergeEnabled.Store(false)
+			distributor := &mockDistributor{}
+			distributor.On("QueryStream", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
+				client.CombinedQueryStreamResponse{
+					Chunkseries: []client.TimeSeriesChunk{
+						{
+							Labels: []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "one"}, {Name: labels.InstanceName, Value: "foo"}},
+							Chunks: chunks,
+						},
+					},
+				},
+				nil)
+
+			engine := promql.NewEngine(promql.EngineOpts{
+				Logger:     logger,
+				MaxSamples: 1e6,
+				Timeout:    1 * time.Minute,
+			})
+
+			queryable, _, _ := New(cfg, overrides, distributor, nil, nil, logger, nil)
+			ctx := user.InjectOrgID(context.Background(), "user-1")
+
+			b.Run(name, func(b *testing.B) {
+				b.ReportAllocs()
+
+				for i := 0; i < b.N; i++ {
+					query, err := engine.NewRangeQuery(ctx, queryable, nil, `rate({__name__=~".+"}[10s])`, queryStart, queryEnd, queryStep)
+					require.NoError(b, err)
+
+					r := query.Exec(ctx)
+					m, err := r.Matrix()
+					require.NoError(b, err)
+
+					require.Equal(b, 1, m.Len())
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkQueryExecuteBadMerge(b *testing.B) {
+	var (
+		logger    = log.NewNopLogger()
+		queryStep = time.Second
+	)
+
+	var cfg Config
+	flagext.DefaultValues(&cfg)
+
+	limits := defaultLimitsConfig()
+	limits.QueryIngestersWithin = 0 // Always query ingesters in this test.
+	overrides, err := validation.NewOverrides(limits, nil)
+	require.NoError(b, err)
+
+	scenarios := []struct {
+		numChunks          int
+		numSamplesPerChunk int
+		duplicationFactor  int
+	}{
+		{numChunks: 1000, numSamplesPerChunk: 100, duplicationFactor: 1},
+		{numChunks: 1000, numSamplesPerChunk: 100, duplicationFactor: 3},
+	}
+
+	for _, scenario := range scenarios {
+		for _, encoding := range []chunk.Encoding{
+			chunk.PrometheusXorChunk,
+			chunk.PrometheusHistogramChunk,
+			chunk.PrometheusFloatHistogramChunk,
+		} {
+			name := fmt.Sprintf("duplication factor: %d encoding: %s", scenario.duplicationFactor, encoding)
+			queryStart := time.Now().Add(-time.Second * time.Duration(scenario.numChunks*scenario.numSamplesPerChunk))
+			queryEnd := time.Now()
+			chunks := createChunks(b, scenario.numChunks, scenario.numSamplesPerChunk, scenario.duplicationFactor, queryStart, queryStep, encoding)
+			// Mock distributor to return chunks that need merging.
+			batch.MergeableBatchStreamEnabled.Store(true)
+			batch.BadMergeableBatchStreamMergeEnabled.Store(true)
+			distributor := &mockDistributor{}
+			distributor.On("QueryStream", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
+				client.CombinedQueryStreamResponse{
+					Chunkseries: []client.TimeSeriesChunk{
+						{
+							Labels: []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "one"}, {Name: labels.InstanceName, Value: "foo"}},
+							Chunks: chunks,
+						},
+					},
+				},
+				nil)
+
+			engine := promql.NewEngine(promql.EngineOpts{
+				Logger:     logger,
+				MaxSamples: 1e6,
+				Timeout:    1 * time.Minute,
+			})
+
+			queryable, _, _ := New(cfg, overrides, distributor, nil, nil, logger, nil)
+			ctx := user.InjectOrgID(context.Background(), "user-1")
+
+			b.Run(name, func(b *testing.B) {
+				b.ReportAllocs()
+
+				for i := 0; i < b.N; i++ {
+					query, err := engine.NewRangeQuery(ctx, queryable, nil, `rate({__name__=~".+"}[10s])`, queryStart, queryEnd, queryStep)
+					require.NoError(b, err)
+
+					r := query.Exec(ctx)
+					m, err := r.Matrix()
+					require.NoError(b, err)
+
+					require.Equal(b, 1, m.Len())
+				}
+			})
+		}
+	}
+}
+
 func mockTSDB(t *testing.T, mint model.Time, samples int, step, chunkOffset time.Duration, samplesPerChunk int, valueType func(model.Time) chunkenc.ValueType) (storage.Queryable, model.Time) {
 	dir := t.TempDir()
 
