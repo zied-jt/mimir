@@ -345,6 +345,7 @@ func (bs *mergeableBatchStream) mergeStreams(batch *chunk.Batch, size int) []chu
 // badMerge is a concatenation of mergeStreams and merge, and shows a memory allocation degradation.
 // It is literally a copy of mergeStreams and a copy of merge.
 func (bs *mergeableBatchStream) badMerge(batch *chunk.Batch, size int) {
+	origBsBatches := bs.batches[:0]
 	// Reset the Index and Length of existing batches.
 	for i := range bs.batchesBuf {
 		bs.batchesBuf[i].Index = 0
@@ -434,6 +435,6 @@ func (bs *mergeableBatchStream) badMerge(batch *chunk.Batch, size int) {
 	// has to be appended, hence it tells the length.
 	b.Length = b.Index
 
-	bs.batches = append(bs.batches[:0], bs.batchesBuf[:resultLen]...)
+	bs.batches = append(origBsBatches, bs.batchesBuf[:resultLen]...)
 	bs.reset()
 }
