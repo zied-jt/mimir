@@ -18,6 +18,7 @@ import (
 )
 
 var MergeableBatchStreamEnabled atomic.Bool
+var BadMergeableBatchStreamMergeEnabled atomic.Bool
 
 type mergeIterator struct {
 	its []*nonOverlappingIterator
@@ -191,7 +192,11 @@ func (c *mergeIterator) buildNextBatch(size int) chunkenc.ValueType {
 	for len(c.h) > 0 && (c.batchLen() == 0 || c.nextBatchEndTime() >= c.h[0].AtTime()) {
 		if MergeableBatchStreamEnabled.Load() {
 			batch := c.h[0].Batch()
-			c.mBatches.merge(&batch, size)
+			if BadMergeableBatchStreamMergeEnabled.Load() {
+				c.mBatches.badMerge(&batch, size)
+			} else {
+				c.mBatches.merge(&batch, size)
+			}
 		} else {
 			c.nextBatchBuf[0] = c.h[0].Batch()
 			c.batchesBuf = mergeStreams(c.batches, c.nextBatchBuf[:], c.batchesBuf, size, &c.hPool, &c.fhPool)

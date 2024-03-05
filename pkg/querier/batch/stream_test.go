@@ -146,88 +146,94 @@ func requireBatchEqual(t *testing.T, b, o chunk.Batch) {
 }
 
 func TestBatchStream_Merge(t *testing.T) {
-	for i, tc := range []struct {
-		testcase   string
-		batches    []chunk.Batch
-		newBatches []chunk.Batch
-		output     []chunk.Batch
-	}{
-		{
-			testcase: "One float input",
-			batches:  []chunk.Batch{mkFloatBatch(0)},
-			output:   []chunk.Batch{mkFloatBatch(0)},
-		},
+	for _, badMerge := range []bool{false, true} {
+		for i, tc := range []struct {
+			testcase   string
+			batches    []chunk.Batch
+			newBatches []chunk.Batch
+			output     []chunk.Batch
+		}{
+			{
+				testcase: "One float input",
+				batches:  []chunk.Batch{mkFloatBatch(0)},
+				output:   []chunk.Batch{mkFloatBatch(0)},
+			},
 
-		{
-			testcase:   "Equal float inputs",
-			batches:    []chunk.Batch{mkFloatBatch(0)},
-			newBatches: []chunk.Batch{mkFloatBatch(0)},
-			output:     []chunk.Batch{mkFloatBatch(0)},
-		},
+			{
+				testcase:   "Equal float inputs",
+				batches:    []chunk.Batch{mkFloatBatch(0)},
+				newBatches: []chunk.Batch{mkFloatBatch(0)},
+				output:     []chunk.Batch{mkFloatBatch(0)},
+			},
 
-		{
-			testcase:   "Non overlapping float inputs",
-			batches:    []chunk.Batch{mkFloatBatch(0)},
-			newBatches: []chunk.Batch{mkFloatBatch(chunk.BatchSize)},
-			output:     []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize)},
-		},
+			{
+				testcase:   "Non overlapping float inputs",
+				batches:    []chunk.Batch{mkFloatBatch(0)},
+				newBatches: []chunk.Batch{mkFloatBatch(chunk.BatchSize)},
+				output:     []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize)},
+			},
 
-		{
-			testcase:   "Overlapping and overhanging float inputs 0-11, 12-23 vs 6-17, 24-35",
-			batches:    []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize)},
-			newBatches: []chunk.Batch{mkFloatBatch(chunk.BatchSize / 2), mkFloatBatch(2 * chunk.BatchSize)},
-			output:     []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize), mkFloatBatch(2 * chunk.BatchSize)},
-		},
+			{
+				testcase:   "Overlapping and overhanging float inputs 0-11, 12-23 vs 6-17, 24-35",
+				batches:    []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize)},
+				newBatches: []chunk.Batch{mkFloatBatch(chunk.BatchSize / 2), mkFloatBatch(2 * chunk.BatchSize)},
+				output:     []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize), mkFloatBatch(2 * chunk.BatchSize)},
+			},
 
-		{
-			testcase:   "Overlapping and overhanging float inputs 6-17, 18-29, 30-41 vs 0-11, 12-23, 24-35, 36-47",
-			batches:    []chunk.Batch{mkFloatBatch(chunk.BatchSize / 2), mkFloatBatch(3 * chunk.BatchSize / 2), mkFloatBatch(5 * chunk.BatchSize / 2)},
-			newBatches: []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize), mkFloatBatch(3 * chunk.BatchSize)},
-			output:     []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize), mkFloatBatch(2 * chunk.BatchSize), mkFloatBatch(3 * chunk.BatchSize)},
-		},
+			{
+				testcase:   "Overlapping and overhanging float inputs 6-17, 18-29, 30-41 vs 0-11, 12-23, 24-35, 36-47",
+				batches:    []chunk.Batch{mkFloatBatch(chunk.BatchSize / 2), mkFloatBatch(3 * chunk.BatchSize / 2), mkFloatBatch(5 * chunk.BatchSize / 2)},
+				newBatches: []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize), mkFloatBatch(3 * chunk.BatchSize)},
+				output:     []chunk.Batch{mkFloatBatch(0), mkFloatBatch(chunk.BatchSize), mkFloatBatch(2 * chunk.BatchSize), mkFloatBatch(3 * chunk.BatchSize)},
+			},
 
-		{
-			testcase: "Equal histograms",
-			batches:  []chunk.Batch{mkHistogramBatch(0)},
-			output:   []chunk.Batch{mkHistogramBatch(0)},
-		},
+			{
+				testcase: "Equal histograms",
+				batches:  []chunk.Batch{mkHistogramBatch(0)},
+				output:   []chunk.Batch{mkHistogramBatch(0)},
+			},
 
-		{
-			testcase:   "Histogram preferred over float",
-			batches:    []chunk.Batch{mkHistogramBatch(0), mkFloatBatch(chunk.BatchSize)},
-			newBatches: []chunk.Batch{mkFloatBatch(0), mkHistogramBatch(chunk.BatchSize)},
-			output:     []chunk.Batch{mkHistogramBatch(0), mkHistogramBatch(chunk.BatchSize)},
-		},
+			{
+				testcase:   "Histogram preferred over float",
+				batches:    []chunk.Batch{mkHistogramBatch(0), mkFloatBatch(chunk.BatchSize)},
+				newBatches: []chunk.Batch{mkFloatBatch(0), mkHistogramBatch(chunk.BatchSize)},
+				output:     []chunk.Batch{mkHistogramBatch(0), mkHistogramBatch(chunk.BatchSize)},
+			},
 
-		{
-			testcase:   "Non overlapping histograms and floats",
-			batches:    []chunk.Batch{mkFloatBatch(0)},
-			newBatches: []chunk.Batch{mkHistogramBatch(chunk.BatchSize)},
-			output:     []chunk.Batch{mkFloatBatch(0), mkHistogramBatch(chunk.BatchSize)},
-		},
+			{
+				testcase:   "Non overlapping histograms and floats",
+				batches:    []chunk.Batch{mkFloatBatch(0)},
+				newBatches: []chunk.Batch{mkHistogramBatch(chunk.BatchSize)},
+				output:     []chunk.Batch{mkFloatBatch(0), mkHistogramBatch(chunk.BatchSize)},
+			},
 
-		{
-			testcase:   "Histogram splits floats 0-12 float vs histogram at 6",
-			batches:    []chunk.Batch{mkFloatBatch(0)},
-			newBatches: []chunk.Batch{mkGenericHistogramBatch(chunk.BatchSize/2, 1)},
-			output:     []chunk.Batch{mkGenericFloatBatch(0, 6), mkGenericHistogramBatch(chunk.BatchSize/2, 1), mkGenericFloatBatch(7, 5)},
-		},
-	} {
-		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			s := newBatchStream(len(tc.batches), nil, nil)
-			s.batches = tc.batches
+			{
+				testcase:   "Histogram splits floats 0-12 float vs histogram at 6",
+				batches:    []chunk.Batch{mkFloatBatch(0)},
+				newBatches: []chunk.Batch{mkGenericHistogramBatch(chunk.BatchSize/2, 1)},
+				output:     []chunk.Batch{mkGenericFloatBatch(0, 6), mkGenericHistogramBatch(chunk.BatchSize/2, 1), mkGenericFloatBatch(7, 5)},
+			},
+		} {
+			t.Run(fmt.Sprintf("badMerge: %v testID: %d", badMerge, i), func(t *testing.T) {
+				s := newBatchStream(len(tc.batches), nil, nil)
+				s.batches = tc.batches
 
-			for i := range tc.newBatches {
-				s.merge(&tc.newBatches[i], chunk.BatchSize)
-			}
+				for i := range tc.newBatches {
+					if badMerge {
+						s.badMerge(&tc.newBatches[i], chunk.BatchSize)
+					} else {
+						s.merge(&tc.newBatches[i], chunk.BatchSize)
+					}
+				}
 
-			require.Equal(t, len(tc.output), len(s.batches))
-			for i, batch := range tc.output {
-				other := s.batches[i]
-				requireBatchEqual(t, batch, other)
-				require.Equal(t, 0, batch.Index)
-			}
-		})
+				require.Equal(t, len(tc.output), len(s.batches))
+				for i, batch := range tc.output {
+					other := s.batches[i]
+					requireBatchEqual(t, batch, other)
+					require.Equal(t, 0, batch.Index)
+				}
+			})
+		}
 	}
 }
 

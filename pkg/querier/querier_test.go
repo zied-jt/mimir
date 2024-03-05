@@ -499,53 +499,59 @@ func BenchmarkCompareQueryExecute(b *testing.B) {
 	}
 
 	for _, mergiableBatchStreamEnabled := range []bool{false, true} {
-		for _, scenario := range scenarios {
-			for _, encoding := range []chunk.Encoding{
-				chunk.PrometheusXorChunk,
-				chunk.PrometheusHistogramChunk,
-				chunk.PrometheusFloatHistogramChunk,
-			} {
-				name := fmt.Sprintf("mergiable: %v chunks: %d samples per chunk: %d duplication factor: %d encoding: %s", mergiableBatchStreamEnabled, scenario.numChunks, scenario.numSamplesPerChunk, scenario.duplicationFactor, encoding)
-				queryStart := time.Now().Add(-time.Second * time.Duration(scenario.numChunks*scenario.numSamplesPerChunk))
-				queryEnd := time.Now()
-				chunks := createChunks(b, scenario.numChunks, scenario.numSamplesPerChunk, scenario.duplicationFactor, queryStart, queryStep, encoding)
-				// Mock distributor to return chunks that need merging.
-				batch.MergeableBatchStreamEnabled.Store(mergiableBatchStreamEnabled)
-				distributor := &mockDistributor{}
-				distributor.On("QueryStream", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
-					client.CombinedQueryStreamResponse{
-						Chunkseries: []client.TimeSeriesChunk{
-							{
-								Labels: []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "one"}, {Name: labels.InstanceName, Value: "foo"}},
-								Chunks: chunks,
+		for _, badMergeEnabled := range []bool{false, true} {
+			if !mergiableBatchStreamEnabled && badMergeEnabled {
+				continue
+			}
+			for _, scenario := range scenarios {
+				for _, encoding := range []chunk.Encoding{
+					chunk.PrometheusXorChunk,
+					chunk.PrometheusHistogramChunk,
+					chunk.PrometheusFloatHistogramChunk,
+				} {
+					name := fmt.Sprintf("mergiable: %v badMerge: %v duplication factor: %d encoding: %s", mergiableBatchStreamEnabled, badMergeEnabled, scenario.duplicationFactor, encoding)
+					queryStart := time.Now().Add(-time.Second * time.Duration(scenario.numChunks*scenario.numSamplesPerChunk))
+					queryEnd := time.Now()
+					chunks := createChunks(b, scenario.numChunks, scenario.numSamplesPerChunk, scenario.duplicationFactor, queryStart, queryStep, encoding)
+					// Mock distributor to return chunks that need merging.
+					batch.MergeableBatchStreamEnabled.Store(mergiableBatchStreamEnabled)
+					batch.BadMergeableBatchStreamMergeEnabled.Store(badMergeEnabled)
+					distributor := &mockDistributor{}
+					distributor.On("QueryStream", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
+						client.CombinedQueryStreamResponse{
+							Chunkseries: []client.TimeSeriesChunk{
+								{
+									Labels: []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "one"}, {Name: labels.InstanceName, Value: "foo"}},
+									Chunks: chunks,
+								},
 							},
 						},
-					},
-					nil)
+						nil)
 
-				engine := promql.NewEngine(promql.EngineOpts{
-					Logger:     logger,
-					MaxSamples: 1e6,
-					Timeout:    1 * time.Minute,
-				})
+					engine := promql.NewEngine(promql.EngineOpts{
+						Logger:     logger,
+						MaxSamples: 1e6,
+						Timeout:    1 * time.Minute,
+					})
 
-				queryable, _, _ := New(cfg, overrides, distributor, nil, nil, logger, nil)
-				ctx := user.InjectOrgID(context.Background(), "user-1")
+					queryable, _, _ := New(cfg, overrides, distributor, nil, nil, logger, nil)
+					ctx := user.InjectOrgID(context.Background(), "user-1")
 
-				b.Run(name, func(b *testing.B) {
-					b.ReportAllocs()
+					b.Run(name, func(b *testing.B) {
+						b.ReportAllocs()
 
-					for i := 0; i < b.N; i++ {
-						query, err := engine.NewRangeQuery(ctx, queryable, nil, `rate({__name__=~".+"}[10s])`, queryStart, queryEnd, queryStep)
-						require.NoError(b, err)
+						for i := 0; i < b.N; i++ {
+							query, err := engine.NewRangeQuery(ctx, queryable, nil, `rate({__name__=~".+"}[10s])`, queryStart, queryEnd, queryStep)
+							require.NoError(b, err)
 
-						r := query.Exec(ctx)
-						m, err := r.Matrix()
-						require.NoError(b, err)
+							r := query.Exec(ctx)
+							m, err := r.Matrix()
+							require.NoError(b, err)
 
-						require.Equal(b, 1, m.Len())
-					}
-				})
+							require.Equal(b, 1, m.Len())
+						}
+					})
+				}
 			}
 		}
 	}
