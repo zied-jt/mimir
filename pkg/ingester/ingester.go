@@ -1356,6 +1356,7 @@ func (i *Ingester) pushSamplesToAppender(userID string, timeseries []mimirpb.Pre
 				})
 				stats.failedExemplarsCount += len(ts.Exemplars)
 			} else { // Note that else is explicit, rather than a continue in the above if, in case of additional logic post exemplar processing.
+				outOfOrderExemplars := 0
 				for _, ex := range ts.Exemplars {
 					if ex.TimestampMs > maxTimestampMs {
 						stats.failedExemplarsCount++
@@ -1376,6 +1377,15 @@ func (i *Ingester) pushSamplesToAppender(userID string, timeseries []mimirpb.Pre
 					if _, err = app.AppendExemplar(ref, labels.EmptyLabels(), e); err == nil {
 						stats.succeededExemplarsCount++
 						continue
+					}
+
+					if errors.Is(err, storage.ErrOutOfOrderExemplar) {
+						outOfOrderExemplars++
+						// Only report out of order exemplars if all are out of order, otherwise this was a partial update
+						// to some existing set of exemplars.
+						if outOfOrderExemplars < len(ts.Exemplars) {
+							continue
+						}
 					}
 
 					// Error adding exemplar
