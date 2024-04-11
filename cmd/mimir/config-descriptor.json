@@ -3095,6 +3095,17 @@
           "fieldFlag": "ingester.owned-series-update-interval",
           "fieldType": "duration",
           "fieldCategory": "experimental"
+        },
+        {
+          "kind": "field",
+          "name": "number_of_cpu_cores_during_slow_pushes",
+          "required": false,
+          "desc": "Number of CPU cores to use in DeadlineExceeded handler. If set to 0, only 1 CPU core will be used.",
+          "fieldValue": null,
+          "fieldDefaultValue": 0,
+          "fieldFlag": "ingester.number-of-cpu-cores-during-slow-pushes",
+          "fieldType": "int",
+          "fieldCategory": "experimental"
         }
       ],
       "fieldValue": null,

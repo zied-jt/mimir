@@ -1204,6 +1204,11 @@ instance_limits:
 # owned series as a result of detected change.
 # CLI flag: -ingester.owned-series-update-interval
 [owned_series_update_interval: <duration> | default = 15s]
+
+# (experimental) Number of CPU cores to use in DeadlineExceeded handler. If set
+# to 0, only 1 CPU core will be used.
+# CLI flag: -ingester.number-of-cpu-cores-during-slow-pushes
+[number_of_cpu_cores_during_slow_pushes: <int> | default = 0]
 ```
 
 ### querier

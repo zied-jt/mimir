@@ -216,6 +216,8 @@ type Config struct {
 
 	// This config can be overridden in tests.
 	limitMetricsUpdatePeriod time.Duration `yaml:"-"`
+
+	NumberOfCpuCoresDuringSlowPushes int `yaml:"number_of_cpu_cores_during_slow_pushes" category:"experimental"`
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet
@@ -248,6 +250,8 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 
 	// Hardcoded config (can only be overridden in tests).
 	cfg.limitMetricsUpdatePeriod = time.Second * 15
+
+	f.IntVar(&cfg.NumberOfCpuCoresDuringSlowPushes, "ingester.number-of-cpu-cores-during-slow-pushes", 0, "Number of CPU cores to use in DeadlineExceeded handler. If set to 0, only 1 CPU core will be used.")
 }
 
 func (cfg *Config) Validate(logger log.Logger) error {
@@ -3724,6 +3728,26 @@ func (i *Ingester) DeadlineExceededHandler(w http.ResponseWriter, req *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (i *Ingester) sleepAndUseCPU(duration time.Duration) {
+	done := make(chan int)
+	if i.cfg.NumberOfCpuCoresDuringSlowPushes > 1 {
+		for k := 0; k < i.cfg.NumberOfCpuCoresDuringSlowPushes; k++ {
+			go func() {
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+				}
+			}()
+		}
+	}
+
+	time.Sleep(duration)
+	close(done)
+}
+
 // PushToStorage implements ingest.Pusher interface for ingestion via ingest-storage.
 func (i *Ingester) PushToStorage(ctx context.Context, req *mimirpb.WriteRequest) error {
 	if i.deadlineExceededEnabled.Load() {
@@ -3731,7 +3755,7 @@ func (i *Ingester) PushToStorage(ctx context.Context, req *mimirpb.WriteRequest)
 		if err != nil {
 			return err
 		}
-		time.Sleep(5 * time.Second)
+		i.sleepAndUseCPU(5 * time.Second)
 		level.Error(i.logger).Log("msg", "slept for 5s and will continue", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
 	}
 	err := i.PushWithCleanup(ctx, req, func() { mimirpb.ReuseSlice(req.Timeseries) })
