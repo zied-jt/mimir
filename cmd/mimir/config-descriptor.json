@@ -2281,6 +2281,17 @@
               "fieldFlag": "ingester.client.circuit-breaker.cooldown-period",
               "fieldType": "duration",
               "fieldCategory": "experimental"
+            },
+            {
+              "kind": "field",
+              "name": "percentage_allowed_executions_in_open_state",
+              "required": false,
+              "desc": "Percentage of requests that will be allowed when the circuit breaker is in the open state. If it is different than 0, the circuit breaker will never wait before allowing new requests.",
+              "fieldValue": null,
+              "fieldDefaultValue": 0,
+              "fieldFlag": "ingester.client.circuit-breaker.percentage-allowed-executions-in-open-state",
+              "fieldType": "int",
+              "fieldCategory": "experimental"
             }
           ],
           "fieldValue": null,

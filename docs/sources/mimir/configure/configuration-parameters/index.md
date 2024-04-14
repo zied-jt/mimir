@@ -2376,6 +2376,12 @@ circuit_breaker:
   # CLI flag: -ingester.client.circuit-breaker.cooldown-period
   [cooldown_period: <duration> | default = 10s]
 
+  # (experimental) Percentage of requests that will be allowed when the circuit
+  # breaker is in the open state. If it is different than 0, the circuit breaker
+  # will never wait before allowing new requests.
+  # CLI flag: -ingester.client.circuit-breaker.percentage-allowed-executions-in-open-state
+  [percentage_allowed_executions_in_open_state: <int> | default = 0]
+
 # (deprecated) If set to true, gRPC status codes will be reported in
 # "status_code" label of "cortex_ingester_client_request_duration_seconds"
 # metric. Otherwise, they will be reported as "error"

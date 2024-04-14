@@ -66,6 +66,17 @@ type CircuitBreakerBuilder[R any] interface {
 	// in a HalfOpenSttate state to determine whether to transition back to open or closed.
 	WithFailureRateThreshold(failureRateThreshold uint, failureExecutionThreshold uint, failureThresholdingPeriod time.Duration) CircuitBreakerBuilder[R]
 
+	// WithDelay configures the delay to wait in OpenState before transitioning to HalfOpenState.
+	WithDelay(delay time.Duration) CircuitBreakerBuilder[R]
+
+	// WithDelayFunc configures a function that provides the delay to wait in OpenState before transitioning to HalfOpenState.
+	WithDelayFunc(delayFunc failsafe.DelayFunc[R]) CircuitBreakerBuilder[R]
+
+	// WithPercentageAllowedExecutions sets the percentage of executions that can be allowed in OpenState.
+	//
+	// If WithPercentageAllowedExecutions is configured to a positive value, the circuit never goes into HalfOpenState.
+	WithPercentageAllowedExecutions(percentageAllowedExecutions uint) CircuitBreakerBuilder[R]
+
 	// WithSuccessThreshold configures count based success thresholding by setting the number of consecutive successful
 	// executions that must occur when in a HalfOpenState in order to close the circuit, else the circuit is re-opened when a
 	// failure occurs.
@@ -99,6 +110,9 @@ type circuitBreakerConfig[R any] struct {
 	// Success config
 	successThreshold            uint
 	successThresholdingCapacity uint
+
+	// Partially open config
+	percentageAllowedExecutions uint
 }
 
 var _ CircuitBreakerBuilder[any] = &circuitBreakerConfig[any]{}
@@ -117,7 +131,7 @@ func Builder[R any]() CircuitBreakerBuilder[R] {
 	return &circuitBreakerConfig[R]{
 		BaseFailurePolicy: &policy.BaseFailurePolicy[R]{},
 		BaseDelayablePolicy: &policy.BaseDelayablePolicy[R]{
-			Delay: 1 * time.Minute,
+			Delay: time.Minute,
 		},
 		clock:                       util.NewClock(),
 		failureThreshold:            1,
@@ -190,6 +204,14 @@ func (c *circuitBreakerConfig[R]) WithDelay(delay time.Duration) CircuitBreakerB
 
 func (c *circuitBreakerConfig[R]) WithDelayFunc(delayFunc failsafe.DelayFunc[R]) CircuitBreakerBuilder[R] {
 	c.BaseDelayablePolicy.WithDelayFunc(delayFunc)
+	return c
+}
+
+func (c *circuitBreakerConfig[R]) WithPercentageAllowedExecutions(percentageAllowedExecutions uint) CircuitBreakerBuilder[R] {
+	if percentageAllowedExecutions > 100 {
+		percentageAllowedExecutions = 100
+	}
+	c.percentageAllowedExecutions = percentageAllowedExecutions
 	return c
 }
 

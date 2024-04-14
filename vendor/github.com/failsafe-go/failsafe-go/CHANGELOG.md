@@ -1,8 +1,14 @@
 ## Upcoming Release
 
+## 0.6.2
+
+### Improvements
+
+- New CachePolicy.
+
 ## 0.6.1
 
-## Improvements
+### Improvements
 
 - Better support for HedgePolicy and Timeout composition
 

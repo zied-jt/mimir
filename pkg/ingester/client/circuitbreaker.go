@@ -74,6 +74,7 @@ func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics
 	breaker := circuitbreaker.Builder[any]().
 		WithFailureRateThreshold(cfg.FailureThreshold, cfg.FailureExecutionThreshold, cfg.ThresholdingPeriod).
 		WithDelay(cfg.CooldownPeriod).
+		WithPercentageAllowedExecutions(cfg.PercentageAllowedRequestsInOpenState).
 		OnFailure(func(failsafe.ExecutionEvent[any]) {
 			countError.Inc()
 		}).
