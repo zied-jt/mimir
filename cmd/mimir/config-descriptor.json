@@ -2284,12 +2284,12 @@
             },
             {
               "kind": "field",
-              "name": "percentage_allowed_executions_in_open_state",
+              "name": "percentage_allowed_requests_in_open_state",
               "required": false,
               "desc": "Percentage of requests that will be allowed when the circuit breaker is in the open state. If it is different than 0, the circuit breaker will never wait before allowing new requests.",
               "fieldValue": null,
               "fieldDefaultValue": 0,
-              "fieldFlag": "ingester.client.circuit-breaker.percentage-allowed-executions-in-open-state",
+              "fieldFlag": "ingester.client.circuit-breaker.percentage-allowed-requests-in-open-state",
               "fieldType": "int",
               "fieldCategory": "experimental"
             }
@@ -3105,6 +3105,17 @@
           "fieldDefaultValue": 15000000000,
           "fieldFlag": "ingester.owned-series-update-interval",
           "fieldType": "duration",
+          "fieldCategory": "experimental"
+        },
+        {
+          "kind": "field",
+          "name": "percentage_of_slow_pushes",
+          "required": false,
+          "desc": "Percentage of slow pushes to use in DeadlineExceeded handler.",
+          "fieldValue": null,
+          "fieldDefaultValue": 0,
+          "fieldFlag": "ingester.percentage-of-slow-pushes",
+          "fieldType": "int",
           "fieldCategory": "experimental"
         },
         {

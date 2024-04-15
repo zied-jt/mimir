@@ -217,7 +217,8 @@ type Config struct {
 	// This config can be overridden in tests.
 	limitMetricsUpdatePeriod time.Duration `yaml:"-"`
 
-	NumberOfCpuCoresDuringSlowPushes int `yaml:"number_of_cpu_cores_during_slow_pushes" category:"experimental"`
+	PercentageOfSlowPushes           uint `yaml:"percentage_of_slow_pushes" category:"experimental"`
+	NumberOfCpuCoresDuringSlowPushes uint `yaml:"number_of_cpu_cores_during_slow_pushes" category:"experimental"`
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet
@@ -251,7 +252,8 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	// Hardcoded config (can only be overridden in tests).
 	cfg.limitMetricsUpdatePeriod = time.Second * 15
 
-	f.IntVar(&cfg.NumberOfCpuCoresDuringSlowPushes, "ingester.number-of-cpu-cores-during-slow-pushes", 0, "Number of CPU cores to use in DeadlineExceeded handler. If set to 0, only 1 CPU core will be used.")
+	f.UintVar(&cfg.PercentageOfSlowPushes, "ingester.percentage-of-slow-pushes", 0, "Percentage of slow pushes to use in DeadlineExceeded handler.")
+	f.UintVar(&cfg.NumberOfCpuCoresDuringSlowPushes, "ingester.number-of-cpu-cores-during-slow-pushes", 0, "Number of CPU cores to use in DeadlineExceeded handler. If set to 0, only 1 CPU core will be used.")
 }
 
 func (cfg *Config) Validate(logger log.Logger) error {
@@ -356,6 +358,7 @@ type Ingester struct {
 	ingestPartitionLifecycler *ring.PartitionInstanceLifecycler
 
 	deadlineExceededEnabled atomic.Bool
+	slowRequestsCount       atomic.Uint64
 }
 
 func newIngester(cfg Config, limits *validation.Overrides, registerer prometheus.Registerer, logger log.Logger) (*Ingester, error) {
@@ -3731,7 +3734,7 @@ func (i *Ingester) DeadlineExceededHandler(w http.ResponseWriter, req *http.Requ
 func (i *Ingester) sleepAndUseCPU(duration time.Duration) {
 	done := make(chan int)
 	if i.cfg.NumberOfCpuCoresDuringSlowPushes > 1 {
-		for k := 0; k < i.cfg.NumberOfCpuCoresDuringSlowPushes; k++ {
+		for k := 0; k < int(i.cfg.NumberOfCpuCoresDuringSlowPushes); k++ {
 			go func() {
 				for {
 					select {
@@ -3748,15 +3751,31 @@ func (i *Ingester) sleepAndUseCPU(duration time.Duration) {
 	close(done)
 }
 
+func (i *Ingester) shouldSleep() bool {
+	if i.cfg.PercentageOfSlowPushes == 0 {
+		return false
+	}
+	percentage := i.cfg.PercentageOfSlowPushes
+	if percentage > 100 {
+		percentage = 100
+	}
+	freq := uint64(100 / percentage)
+	if i.deadlineExceededEnabled.Load() {
+		slowRequestsCount := i.slowRequestsCount.Inc()
+		return (slowRequestsCount-1)%freq == 0
+	}
+	return false
+}
+
 // PushToStorage implements ingest.Pusher interface for ingestion via ingest-storage.
 func (i *Ingester) PushToStorage(ctx context.Context, req *mimirpb.WriteRequest) error {
-	if i.deadlineExceededEnabled.Load() {
+	if i.shouldSleep() {
 		userID, err := tenant.TenantID(ctx)
 		if err != nil {
 			return err
 		}
 		i.sleepAndUseCPU(5 * time.Second)
-		level.Error(i.logger).Log("msg", "slept for 5s and will continue", "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
+		level.Error(i.logger).Log("msg", "slept for 5s and will continue", "attempt", i.slowRequestsCount.Load(), "user", userID, "ingester", i.cfg.IngesterRing.InstanceID)
 	}
 	err := i.PushWithCleanup(ctx, req, func() { mimirpb.ReuseSlice(req.Timeseries) })
 	if err != nil {

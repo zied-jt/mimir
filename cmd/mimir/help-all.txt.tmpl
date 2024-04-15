@@ -1285,7 +1285,7 @@ Usage of ./cmd/mimir/mimir:
     	[experimental] How many requests must have been executed in period for the circuit breaker to be eligible to open for the rate of failures (default 100)
   -ingester.client.circuit-breaker.failure-threshold uint
     	[experimental] Max percentage of requests that can fail over period before the circuit breaker opens (default 10)
-  -ingester.client.circuit-breaker.percentage-allowed-executions-in-open-state uint
+  -ingester.client.circuit-breaker.percentage-allowed-requests-in-open-state uint
     	[experimental] Percentage of requests that will be allowed when the circuit breaker is in the open state. If it is different than 0, the circuit breaker will never wait before allowing new requests.
   -ingester.client.circuit-breaker.thresholding-period duration
     	[experimental] Moving window of time that the percentage of failed requests is computed over (default 1m0s)
@@ -1359,7 +1359,7 @@ Usage of ./cmd/mimir/mimir:
     	Period at which metadata we have not seen will remain in memory before being deleted. (default 10m0s)
   -ingester.native-histograms-ingestion-enabled
     	[experimental] Enable ingestion of native histogram samples. If false, native histogram samples are ignored without an error. To query native histograms with query-sharding enabled make sure to set -query-frontend.query-result-response-format to 'protobuf'.
-  -ingester.number-of-cpu-cores-during-slow-pushes int
+  -ingester.number-of-cpu-cores-during-slow-pushes uint
     	[experimental] Number of CPU cores to use in DeadlineExceeded handler. If set to 0, only 1 CPU core will be used.
   -ingester.out-of-order-blocks-external-label-enabled
     	[experimental] Whether the shipper should label out-of-order blocks with an external label before uploading them. Setting this label will compact out-of-order blocks separately from non-out-of-order blocks
@@ -1367,6 +1367,8 @@ Usage of ./cmd/mimir/mimir:
     	[experimental] Non-zero value enables out-of-order support for most recent samples that are within the time window in relation to the TSDB's maximum time, i.e., within [db.maxTime-timeWindow, db.maxTime]). The ingester will need more memory as a factor of rate of out-of-order samples being ingested and the number of series that are getting out-of-order samples. If query falls into this window, cached results will use value from -query-frontend.results-cache-ttl-for-out-of-order-time-window option to specify TTL for resulting cache entry.
   -ingester.owned-series-update-interval duration
     	[experimental] How often to check for ring changes and possibly recompute owned series as a result of detected change. (default 15s)
+  -ingester.percentage-of-slow-pushes uint
+    	[experimental] Percentage of slow pushes to use in DeadlineExceeded handler.
   -ingester.rate-update-period duration
     	Period with which to update the per-tenant ingestion rates. (default 15s)
   -ingester.read-path-cpu-utilization-limit float
