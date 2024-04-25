@@ -20,6 +20,7 @@
 * [ENHANCEMENT] Query-frontend: use zero-allocation experimental decoder for active series queries via `-query-frontend.use-active-series-decoder`. #7665
 * [ENHANCEMENT] Go: updated to 1.22.2. #7802
 * [ENHANCEMENT] Query-frontend: support `limit` parameter on `/prometheus/api/v1/label/{name}/values` and `/prometheus/api/v1/labels` endpoints. #7722
+* [ENGANCEMENT] Query-frontend: experimental support for the `X-Mimir-Query-Stats` header to provide some out of bound statistics. Set the flag `-query-frontend.extra-stats-headers` to `true` to enable.  #7966
 * [BUGFIX] Rules: improve error handling when querier is local to the ruler. #7567
 * [BUGFIX] Querier, store-gateway: Protect against panics raised during snappy encoding. #7520
 * [BUGFIX] Ingester: Prevent timely compaction of empty blocks. #7624

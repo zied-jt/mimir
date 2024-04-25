@@ -1393,6 +1393,10 @@ The `frontend` block configures the query-frontend.
 # CLI flag: -query-frontend.query-stats-enabled
 [query_stats_enabled: <boolean> | default = true]
 
+# (experimental) Add extra query stats headers to the response.
+# CLI flag: -query-frontend.extra-stats-headers
+[extra_stats_headers: <boolean> | default = false]
+
 # (experimental) Timeout for writing active series responses. 0 means the value
 # from `-server.http-write-timeout` is used.
 # CLI flag: -query-frontend.active-series-write-timeout
