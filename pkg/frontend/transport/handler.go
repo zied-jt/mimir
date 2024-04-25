@@ -40,6 +40,7 @@ const (
 	// StatusClientClosedRequest is the status code for when a client request cancellation of an http request
 	StatusClientClosedRequest = 499
 	ServiceTimingHeaderName   = "Server-Timing"
+	MimirQueryStatsHeaderName = "X-Mimir-Query-Stats"
 )
 
 var (
@@ -54,6 +55,7 @@ type HandlerConfig struct {
 	LogQueryRequestHeaders   flagext.StringSliceCSV `yaml:"log_query_request_headers" category:"advanced"`
 	MaxBodySize              int64                  `yaml:"max_body_size" category:"advanced"`
 	QueryStatsEnabled        bool                   `yaml:"query_stats_enabled" category:"advanced"`
+	ExtraQueryStatsHeaders   bool                   `yaml:"extra_stats_headers" category:"experimental"`
 	ActiveSeriesWriteTimeout time.Duration          `yaml:"active_series_write_timeout" category:"experimental"`
 }
 
@@ -62,6 +64,7 @@ func (cfg *HandlerConfig) RegisterFlags(f *flag.FlagSet) {
 	f.Var(&cfg.LogQueryRequestHeaders, "query-frontend.log-query-request-headers", "Comma-separated list of request header names to include in query logs. Applies to both query stats and slow queries logs.")
 	f.Int64Var(&cfg.MaxBodySize, "query-frontend.max-body-size", 10*1024*1024, "Max body size for downstream prometheus.")
 	f.BoolVar(&cfg.QueryStatsEnabled, "query-frontend.query-stats-enabled", true, "False to disable query statistics tracking. When enabled, a message with some statistics is logged for every query.")
+	f.BoolVar(&cfg.ExtraQueryStatsHeaders, "query-frontend.extra-stats-headers", false, "Add extra query stats headers to the response.")
 	f.DurationVar(&cfg.ActiveSeriesWriteTimeout, "query-frontend.active-series-write-timeout", 5*time.Minute, "Timeout for writing active series responses. 0 means the value from `-server.http-write-timeout` is used.")
 }
 
@@ -233,6 +236,9 @@ func (f *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if f.cfg.QueryStatsEnabled {
 		writeServiceTimingHeader(queryResponseTime, hs, queryDetails.QuerierStats)
+	}
+	if f.cfg.ExtraQueryStatsHeaders {
+		writeStatsHeader(hs, queryDetails.QuerierStats)
 	}
 
 	w.WriteHeader(resp.StatusCode)
@@ -445,6 +451,12 @@ func writeServiceTimingHeader(queryResponseTime time.Duration, headers http.Head
 		parts = append(parts, statsValue("querier_wall_time", stats.LoadWallTime()))
 		parts = append(parts, statsValue("response_time", queryResponseTime))
 		headers.Set(ServiceTimingHeaderName, strings.Join(parts, ", "))
+	}
+}
+
+func writeStatsHeader(headers http.Header, stats *querier_stats.Stats) {
+	if stats != nil {
+		headers.Set(MimirQueryStatsHeaderName, fmt.Sprintf("fetched_chunk_bytes=%d", stats.GetFetchedChunkBytes()))
 	}
 }
 
