@@ -81,3 +81,8 @@ func (m *IngesterServerMock) ActiveSeries(req *ActiveSeriesRequest, srv Ingester
 	args := m.Called(req, srv)
 	return args.Error(0)
 }
+
+func (m *IngesterServerMock) ActiveNativeHistogramSeries(req *ActiveNativeHistogramSeriesRequest, srv Ingester_ActiveNativeHistogramSeriesServer) error {
+	args := m.Called(req, srv)
+	return args.Error(0)
+}

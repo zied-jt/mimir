@@ -134,6 +134,15 @@ func (i *ActivityTrackerWrapper) ActiveSeries(request *client.ActiveSeriesReques
 	return i.ing.ActiveSeries(request, server)
 }
 
+func (i *ActivityTrackerWrapper) ActiveNativeHistogramSeries(request *client.ActiveNativeHistogramSeriesRequest, server client.Ingester_ActiveNativeHistogramSeriesServer) error {
+	ix := i.tracker.Insert(func() string {
+		return requestActivity(server.Context(), "Ingester/ActiveNativeHistogramSeries", request)
+	})
+	defer i.tracker.Delete(ix)
+
+	return i.ing.ActiveNativeHistogramSeries(request, server)
+}
+
 func (i *ActivityTrackerWrapper) FlushHandler(w http.ResponseWriter, r *http.Request) {
 	ix := i.tracker.Insert(func() string {
 		return requestActivity(r.Context(), "Ingester/FlushHandler", nil)

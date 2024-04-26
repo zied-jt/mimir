@@ -38,6 +38,7 @@ service Ingester {
   rpc LabelValuesCardinality(LabelValuesCardinalityRequest) returns (stream LabelValuesCardinalityResponse) {};
 
   rpc ActiveSeries(ActiveSeriesRequest) returns (stream ActiveSeriesResponse) {};
+  rpc ActiveNativeHistogramSeries(ActiveNativeHistogramSeriesRequest) returns (stream ActiveNativeHistogramSeriesResponse) {};
 
   // When adding more read-path methods here, please update ingester_read_path_routes_regex in operations/mimir-mixin/config.libsonnet as well.
 }
@@ -135,6 +136,10 @@ message ExemplarQueryRequest {
 }
 
 message ActiveSeriesRequest {
+  repeated LabelMatcher matchers = 1;
+}
+
+message ActiveNativeHistogramSeriesRequest {
   repeated LabelMatcher matchers = 1;
 }
 
@@ -237,6 +242,15 @@ message MetricsMetadataResponse {
 
 message ActiveSeriesResponse {
   repeated cortexpb.Metric metric = 1;
+}
+
+message ActiveNativeHistogramSeriesInfo {
+  cortexpb.Metric metric = 1;
+  int64           bucket_count = 2;
+}
+
+message ActiveNativeHistogramSeriesResponse {
+  repeated ActiveNativeHistogramSeriesInfo series = 1;
 }
 
 message TimeSeriesChunk {

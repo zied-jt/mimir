@@ -39,6 +39,12 @@ func SendActiveSeriesResponse(s Ingester_ActiveSeriesServer, response *ActiveSer
 	})
 }
 
+func SendActiveNativeHistogramSeriesResponse(s Ingester_ActiveNativeHistogramSeriesServer, response *ActiveNativeHistogramSeriesResponse) error {
+	return sendWithContextErrChecking(s.Context(), func() error {
+		return s.Send(response)
+	})
+}
+
 func sendWithContextErrChecking(ctx context.Context, send func() error) error {
 	// If the context has been canceled or its deadline exceeded, we should return it
 	// instead of the cryptic error the Send() will return.

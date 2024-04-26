@@ -174,6 +174,14 @@ func ToActiveSeriesRequest(matchers []*labels.Matcher) (*ActiveSeriesRequest, er
 	return &ActiveSeriesRequest{Matchers: ms}, nil
 }
 
+func ToActiveNativeHistogramSeriesRequest(matchers []*labels.Matcher) (*ActiveNativeHistogramSeriesRequest, error) {
+	ms, err := ToLabelMatchers(matchers)
+	if err != nil {
+		return nil, err
+	}
+	return &ActiveNativeHistogramSeriesRequest{Matchers: ms}, nil
+}
+
 func ToLabelMatchers(matchers []*labels.Matcher) ([]*LabelMatcher, error) {
 	result := make([]*LabelMatcher, 0, len(matchers))
 	for _, matcher := range matchers {
