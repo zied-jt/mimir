@@ -170,7 +170,7 @@ func handler(
 			if code != 202 {
 				level.Error(logger).Log("msg", "push error", "err", err)
 			}
-			addHeaders(w, err, r, code, retryCfg)
+			addHeaders(w, err, r, code, retryCfg, logger)
 			http.Error(w, msg, code)
 		}
 	})
@@ -237,7 +237,7 @@ func toHTTPStatus(ctx context.Context, pushErr error, limits *validation.Overrid
 	return http.StatusInternalServerError
 }
 
-func addHeaders(w http.ResponseWriter, err error, r *http.Request, responseCode int, retryCfg RetryConfig) {
+func addHeaders(w http.ResponseWriter, err error, r *http.Request, responseCode int, retryCfg RetryConfig, logger log.Logger) {
 	var doNotLogError middleware.DoNotLogError
 	if errors.As(err, &doNotLogError) {
 		w.Header().Set(server.DoNotLogErrorHeaderKey, "true")
@@ -251,6 +251,7 @@ func addHeaders(w http.ResponseWriter, err error, r *http.Request, responseCode 
 			if sp := opentracing.SpanFromContext(r.Context()); sp != nil {
 				sp.SetTag("retry-after", retrySeconds)
 				sp.SetTag("retry-attempt", retryAttemptHeader)
+				level.Warn(logger).Log("msg", "retry-after header set", "retry-after", retrySeconds, "retry-attempt", retryAttemptHeader)
 			}
 		}
 	}

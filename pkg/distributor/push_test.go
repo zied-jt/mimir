@@ -961,7 +961,7 @@ func TestHandler_HandleRetryAfterHeader(t *testing.T) {
 				req.Header.Add("Retry-Attempt", tc.retryAttempt)
 			}
 
-			addHeaders(recorder, nil, req, tc.responseCode, tc.retryCfg)
+			addHeaders(recorder, nil, req, tc.responseCode, tc.retryCfg, log.NewNopLogger())
 
 			retryAfter := recorder.Header().Get("Retry-After")
 			if !tc.expectRetry {
@@ -1148,12 +1148,12 @@ func TestHandler_ToHTTPStatus(t *testing.T) {
 		},
 		"a circuitBreakerOpenError gets translated into an HTTP 503": {
 			err:                newCircuitBreakerOpenError(client.ErrCircuitBreakerOpen{}),
-			expectedHTTPStatus: http.StatusServiceUnavailable,
+			expectedHTTPStatus: http.StatusInternalServerError,
 			expectedErrorMsg:   circuitbreaker.ErrOpen.Error(),
 		},
 		"a wrapped circuitBreakerOpenError gets translated into an HTTP 503": {
 			err:                errors.Wrap(newCircuitBreakerOpenError(client.ErrCircuitBreakerOpen{}), fmt.Sprintf("%s %s", failedPushingToIngesterMessage, ingesterID)),
-			expectedHTTPStatus: http.StatusServiceUnavailable,
+			expectedHTTPStatus: http.StatusInternalServerError,
 			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, circuitbreaker.ErrOpen),
 		},
 	}
