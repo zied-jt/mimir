@@ -58,16 +58,21 @@ func (e ErrCircuitBreakerOpen) Unwrap() error {
 	return circuitbreaker.ErrOpen
 }
 
-func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics *Metrics, logger log.Logger) grpc.UnaryClientInterceptor {
+type CircuitBreaker struct {
+	circuitbreaker.CircuitBreaker[any]
+	ingester ring.InstanceDesc
+	metrics  *Metrics
+}
+
+func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics *Metrics, logger log.Logger) *CircuitBreaker {
 	// Initialize each of the known labels for circuit breaker metrics for this particular ingester
 	transitionOpen := metrics.circuitBreakerTransitions.WithLabelValues(inst.Id, circuitbreaker.OpenState.String())
 	transitionHalfOpen := metrics.circuitBreakerTransitions.WithLabelValues(inst.Id, circuitbreaker.HalfOpenState.String())
 	transitionClosed := metrics.circuitBreakerTransitions.WithLabelValues(inst.Id, circuitbreaker.ClosedState.String())
 	countSuccess := metrics.circuitBreakerResults.WithLabelValues(inst.Id, resultSuccess)
 	countError := metrics.circuitBreakerResults.WithLabelValues(inst.Id, resultError)
-	countOpen := metrics.circuitBreakerResults.WithLabelValues(inst.Id, resultOpen)
 
-	breaker := circuitbreaker.Builder[any]().
+	cb := circuitbreaker.Builder[any]().
 		WithFailureRateThreshold(cfg.FailureThreshold, cfg.FailureExecutionThreshold, cfg.ThresholdingPeriod).
 		WithDelay(cfg.CooldownPeriod).
 		OnFailure(func(failsafe.ExecutionEvent[any]) {
@@ -90,8 +95,16 @@ func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics
 		}).
 		HandleIf(func(_ any, err error) bool { return isFailure(err) }).
 		Build()
+	return &CircuitBreaker{
+		CircuitBreaker: cb,
+		ingester:       inst,
+		metrics:        metrics,
+	}
+}
 
-	executor := failsafe.NewExecutor[any](breaker)
+func (cb *CircuitBreaker) UnaryClientInterceptor() grpc.UnaryClientInterceptor {
+	countOpen := cb.metrics.circuitBreakerResults.WithLabelValues(cb.ingester.Id, resultOpen)
+	executor := failsafe.NewExecutor[any](cb)
 
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		// Don't circuit break non-ingester things like health check endpoints
@@ -105,7 +118,7 @@ func NewCircuitBreaker(inst ring.InstanceDesc, cfg CircuitBreakerConfig, metrics
 
 		if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
 			countOpen.Inc()
-			return ErrCircuitBreakerOpen{remainingDelay: breaker.RemainingDelay()}
+			return ErrCircuitBreakerOpen{remainingDelay: cb.RemainingDelay()}
 		}
 
 		return err

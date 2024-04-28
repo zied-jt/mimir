@@ -90,6 +90,10 @@ type DoBatchOptions struct {
 
 	// Go will be used to spawn the callback goroutines, and can be used to use a worker pool like concurrency.ReusableGoroutinesPool.
 	Go func(func())
+
+	// IsHighPriorityInstance classifies objects of type InstanceDesc into higher and lower priority.
+	// Instances with a higher priority will be served first.
+	IsHighPriorityInstance func(instance InstanceDesc) bool
 }
 
 func (o *DoBatchOptions) replaceZeroValuesWithDefaults() {
@@ -101,6 +105,11 @@ func (o *DoBatchOptions) replaceZeroValuesWithDefaults() {
 	}
 	if o.Go == nil {
 		o.Go = func(f func()) { go f() }
+	}
+	if o.IsHighPriorityInstance == nil {
+		o.IsHighPriorityInstance = func(_ InstanceDesc) bool {
+			return true
+		}
 	}
 }
 
@@ -121,7 +130,8 @@ func DoBatchWithOptions(ctx context.Context, op Operation, r DoBatchRing, keys [
 	}
 	expectedTrackersPerInstance := len(keys) * (r.ReplicationFactor() + 1) / r.InstancesCount()
 	itemTrackers := make([]itemTracker, len(keys))
-	instances := make(map[string]instance, r.InstancesCount())
+	highPriorityInstances := make(map[string]instance, r.InstancesCount())
+	lowPriorityInstances := make(map[string]instance, r.InstancesCount())
 
 	var (
 		bufDescs [GetBufferSize]InstanceDesc
@@ -148,15 +158,23 @@ func DoBatchWithOptions(ctx context.Context, op Operation, r DoBatchRing, keys [
 		itemTrackers[i].remaining.Store(int32(len(replicationSet.Instances)))
 
 		for _, desc := range replicationSet.Instances {
-			curr, found := instances[desc.Addr]
+			curr, found := highPriorityInstances[desc.Addr]
 			if !found {
-				curr.itemTrackers = make([]*itemTracker, 0, expectedTrackersPerInstance)
-				curr.indexes = make([]int, 0, expectedTrackersPerInstance)
+				curr, found = lowPriorityInstances[desc.Addr]
+				if !found {
+					curr.itemTrackers = make([]*itemTracker, 0, expectedTrackersPerInstance)
+					curr.indexes = make([]int, 0, expectedTrackersPerInstance)
+				}
 			}
-			instances[desc.Addr] = instance{
+			ins := instance{
 				desc:         desc,
 				itemTrackers: append(curr.itemTrackers, &itemTrackers[i]),
 				indexes:      append(curr.indexes, i),
+			}
+			if o.IsHighPriorityInstance(desc) {
+				highPriorityInstances[desc.Addr] = ins
+			} else {
+				lowPriorityInstances[desc.Addr] = ins
 			}
 		}
 	}
@@ -175,8 +193,26 @@ func DoBatchWithOptions(ctx context.Context, op Operation, r DoBatchRing, keys [
 
 	var wg sync.WaitGroup
 
-	wg.Add(len(instances))
-	for _, i := range instances {
+	fmt.Print("high priority instances: ")
+	for id := range highPriorityInstances {
+		fmt.Printf("%s ", id)
+	}
+	fmt.Print(", low priority instances: ")
+	for id := range lowPriorityInstances {
+		fmt.Printf("%s ", id)
+	}
+	fmt.Println()
+
+	wg.Add(len(highPriorityInstances) + len(lowPriorityInstances))
+	for _, i := range highPriorityInstances {
+		i := i
+		o.Go(func() {
+			err := callback(i.desc, i.indexes)
+			tracker.record(i.itemTrackers, err, o.IsClientError)
+			wg.Done()
+		})
+	}
+	for _, i := range lowPriorityInstances {
 		i := i
 		o.Go(func() {
 			err := callback(i.desc, i.indexes)

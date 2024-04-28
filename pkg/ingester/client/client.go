@@ -9,6 +9,7 @@ import (
 	"flag"
 	"time"
 
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/go-kit/log"
 	"github.com/grafana/dskit/grpcclient"
 	"github.com/grafana/dskit/middleware"
@@ -28,12 +29,14 @@ type HealthAndIngesterClient interface {
 	IngesterClient
 	grpc_health_v1.HealthClient
 	Close() error
+	IsCircuitBreakerOpen() bool
 }
 
 type closableHealthAndIngesterClient struct {
 	IngesterClient
 	grpc_health_v1.HealthClient
-	conn *grpc.ClientConn
+	conn           *grpc.ClientConn
+	circuitBreaker *CircuitBreaker
 }
 
 // MakeIngesterClient makes a new IngesterClient
@@ -44,8 +47,10 @@ func MakeIngesterClient(inst ring.InstanceDesc, cfg Config, metrics *Metrics, lo
 		reportGRPCStatusesOptions = []middleware.InstrumentationOption{middleware.ReportGRPCStatusOption}
 	}
 	unary, stream := grpcclient.Instrument(metrics.requestDuration, reportGRPCStatusesOptions...)
+	var circuitBreaker *CircuitBreaker
 	if cfg.CircuitBreaker.Enabled {
-		unary = append([]grpc.UnaryClientInterceptor{NewCircuitBreaker(inst, cfg.CircuitBreaker, metrics, logger)}, unary...)
+		circuitBreaker = NewCircuitBreaker(inst, cfg.CircuitBreaker, metrics, logger)
+		unary = append([]grpc.UnaryClientInterceptor{circuitBreaker.UnaryClientInterceptor()}, unary...)
 	}
 	unary = append(unary, querierapi.ReadConsistencyClientUnaryInterceptor)
 	stream = append(stream, querierapi.ReadConsistencyClientStreamInterceptor)
@@ -66,11 +71,16 @@ func MakeIngesterClient(inst ring.InstanceDesc, cfg Config, metrics *Metrics, lo
 		IngesterClient: ingClient,
 		HealthClient:   grpc_health_v1.NewHealthClient(conn),
 		conn:           conn,
+		circuitBreaker: circuitBreaker,
 	}, nil
 }
 
 func (c *closableHealthAndIngesterClient) Close() error {
 	return c.conn.Close()
+}
+
+func (c *closableHealthAndIngesterClient) IsCircuitBreakerOpen() bool {
+	return c.circuitBreaker.State() == circuitbreaker.OpenState
 }
 
 // Config is the configuration struct for the ingester client

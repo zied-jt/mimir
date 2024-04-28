@@ -95,7 +95,7 @@ func TestNewCircuitBreaker(t *testing.T) {
 		FailureExecutionThreshold: 1,
 		ThresholdingPeriod:        60 * time.Second,
 		CooldownPeriod:            coolDown,
-	}, NewMetrics(reg), test.NewTestingLogger(t))
+	}, NewMetrics(reg), test.NewTestingLogger(t)).UnaryClientInterceptor()
 
 	// Initial request that should succeed because the circuit breaker is "closed"
 	err := breaker(context.Background(), "/cortex.Ingester/Push", "", "", &conn, success)
