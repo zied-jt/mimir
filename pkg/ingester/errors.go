@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/gogo/status"
 	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/httpgrpc"
@@ -577,6 +578,28 @@ func (e ingesterPushGrpcDisabledError) errorCause() mimirpb.ErrorCause {
 // Ensure that ingesterPushGrpcDisabledError is an ingesterError.
 var _ ingesterError = ingesterPushGrpcDisabledError{}
 
+type circuitBreakerOpenError struct {
+	delay time.Duration
+}
+
+func newCircuitBreakerOpenError(delay time.Duration) circuitBreakerOpenError {
+	return circuitBreakerOpenError{delay: delay}
+}
+
+func (e circuitBreakerOpenError) remainingDelay() time.Duration {
+	return e.delay
+}
+
+func (e circuitBreakerOpenError) Error() string {
+	return circuitbreaker.ErrOpen.Error()
+}
+
+func (e circuitBreakerOpenError) errorCause() mimirpb.ErrorCause {
+	return mimirpb.CIRCUIT_BREAKER_OPEN
+}
+
+var _ ingesterError = circuitBreakerOpenError{}
+
 type ingesterErrSamplers struct {
 	sampleTimestampTooOld             *log.Sampler
 	sampleTimestampTooOldOOOEnabled   *log.Sampler
@@ -625,6 +648,8 @@ func mapPushErrorToErrorWithStatus(err error) error {
 			errCode = codes.Internal
 		case mimirpb.METHOD_NOT_ALLOWED:
 			errCode = codes.Unimplemented
+		case mimirpb.CIRCUIT_BREAKER_OPEN:
+			errCode = codes.Unavailable
 		}
 	}
 	return newErrorWithStatus(wrappedErr, errCode)
@@ -646,6 +671,8 @@ func mapPushErrorToErrorWithHTTPOrGRPCStatus(err error) error {
 			return newErrorWithHTTPStatus(err, http.StatusServiceUnavailable)
 		case mimirpb.METHOD_NOT_ALLOWED:
 			return newErrorWithStatus(err, codes.Unimplemented)
+		case mimirpb.CIRCUIT_BREAKER_OPEN:
+			return newErrorWithStatus(err, codes.Unavailable)
 		}
 	}
 	return err

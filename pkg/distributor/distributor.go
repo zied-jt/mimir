@@ -1395,10 +1395,9 @@ func (d *Distributor) sendWriteRequestToBackends(ctx context.Context, tenantID s
 	}
 
 	batchOptions := ring.DoBatchOptions{
-		Cleanup:                batchCleanup,
-		IsClientError:          isIngesterClientError,
-		Go:                     d.doBatchPushWorkers,
-		IsHighPriorityInstance: d.isCircuitBreakerOpen,
+		Cleanup:       batchCleanup,
+		IsClientError: isIngesterClientError,
+		Go:            d.doBatchPushWorkers,
 	}
 
 	// Keep it easy if there's only 1 backend to write to.
@@ -1443,15 +1442,6 @@ func (d *Distributor) sendWriteRequestToBackends(ctx context.Context, tenantID s
 		return partitionsErr
 	}
 	return ingestersErr
-}
-
-func (d *Distributor) isCircuitBreakerOpen(ingesterID ring.InstanceDesc) bool {
-	h, err := d.ingesterPool.GetClientForInstance(ingesterID)
-	if err != nil {
-		return false
-	}
-	c := h.(ingester_client.HealthAndIngesterClient)
-	return c.IsCircuitBreakerOpen()
 }
 
 func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRing ring.DoBatchRing, req *mimirpb.WriteRequest, keys []uint32, initialMetadataIndex int, remoteRequestContext func() context.Context, batchOptions ring.DoBatchOptions) error {

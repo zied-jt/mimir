@@ -80,6 +80,9 @@ func (c *closableHealthAndIngesterClient) Close() error {
 }
 
 func (c *closableHealthAndIngesterClient) IsCircuitBreakerOpen() bool {
+	if c.circuitBreaker == nil {
+		return false
+	}
 	return c.circuitBreaker.State() == circuitbreaker.OpenState
 }
 

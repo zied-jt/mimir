@@ -5,7 +5,6 @@ package ring
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	"go.uber.org/atomic"
@@ -90,10 +89,6 @@ type DoBatchOptions struct {
 
 	// Go will be used to spawn the callback goroutines, and can be used to use a worker pool like concurrency.ReusableGoroutinesPool.
 	Go func(func())
-
-	// IsHighPriorityInstance classifies objects of type InstanceDesc into higher and lower priority.
-	// Instances with a higher priority will be served first.
-	IsHighPriorityInstance func(instance InstanceDesc) bool
 }
 
 func (o *DoBatchOptions) replaceZeroValuesWithDefaults() {
@@ -105,11 +100,6 @@ func (o *DoBatchOptions) replaceZeroValuesWithDefaults() {
 	}
 	if o.Go == nil {
 		o.Go = func(f func()) { go f() }
-	}
-	if o.IsHighPriorityInstance == nil {
-		o.IsHighPriorityInstance = func(_ InstanceDesc) bool {
-			return true
-		}
 	}
 }
 
@@ -130,8 +120,7 @@ func DoBatchWithOptions(ctx context.Context, op Operation, r DoBatchRing, keys [
 	}
 	expectedTrackersPerInstance := len(keys) * (r.ReplicationFactor() + 1) / r.InstancesCount()
 	itemTrackers := make([]itemTracker, len(keys))
-	highPriorityInstances := make(map[string]instance, r.InstancesCount())
-	lowPriorityInstances := make(map[string]instance, r.InstancesCount())
+	instances := make(map[string]instance, r.InstancesCount())
 
 	var (
 		bufDescs [GetBufferSize]InstanceDesc
@@ -158,23 +147,15 @@ func DoBatchWithOptions(ctx context.Context, op Operation, r DoBatchRing, keys [
 		itemTrackers[i].remaining.Store(int32(len(replicationSet.Instances)))
 
 		for _, desc := range replicationSet.Instances {
-			curr, found := highPriorityInstances[desc.Addr]
+			curr, found := instances[desc.Addr]
 			if !found {
-				curr, found = lowPriorityInstances[desc.Addr]
-				if !found {
-					curr.itemTrackers = make([]*itemTracker, 0, expectedTrackersPerInstance)
-					curr.indexes = make([]int, 0, expectedTrackersPerInstance)
-				}
+				curr.itemTrackers = make([]*itemTracker, 0, expectedTrackersPerInstance)
+				curr.indexes = make([]int, 0, expectedTrackersPerInstance)
 			}
-			ins := instance{
+			instances[desc.Addr] = instance{
 				desc:         desc,
 				itemTrackers: append(curr.itemTrackers, &itemTrackers[i]),
 				indexes:      append(curr.indexes, i),
-			}
-			if o.IsHighPriorityInstance(desc) {
-				highPriorityInstances[desc.Addr] = ins
-			} else {
-				lowPriorityInstances[desc.Addr] = ins
 			}
 		}
 	}
@@ -193,26 +174,8 @@ func DoBatchWithOptions(ctx context.Context, op Operation, r DoBatchRing, keys [
 
 	var wg sync.WaitGroup
 
-	fmt.Print("high priority instances: ")
-	for id := range highPriorityInstances {
-		fmt.Printf("%s ", id)
-	}
-	fmt.Print(", low priority instances: ")
-	for id := range lowPriorityInstances {
-		fmt.Printf("%s ", id)
-	}
-	fmt.Println()
-
-	wg.Add(len(highPriorityInstances) + len(lowPriorityInstances))
-	for _, i := range highPriorityInstances {
-		i := i
-		o.Go(func() {
-			err := callback(i.desc, i.indexes)
-			tracker.record(i.itemTrackers, err, o.IsClientError)
-			wg.Done()
-		})
-	}
-	for _, i := range lowPriorityInstances {
+	wg.Add(len(instances))
+	for _, i := range instances {
 		i := i
 		o.Go(func() {
 			err := callback(i.desc, i.indexes)
@@ -247,18 +210,6 @@ func (b *batchTracker) record(itemTrackers []*itemTracker, err error, isClientEr
 	// avoiding race condition
 	for _, it := range itemTrackers {
 		if err != nil {
-			if strings.Contains(err.Error(), "circuit breaker open") {
-				succeded := it.succeeded.Load()
-				if succeded > 0 {
-					prevErr := it.err.Load()
-					prevErrMessage := "nil"
-					if prevErr != nil {
-						prevErrMessage = prevErr.Error()
-					}
-					fmt.Println("msg", "at least one successful request has been executed before an open circuit breaker was detected", "prevErr", prevErrMessage)
-				}
-			}
-
 			// Track the number of errors by error family, and if it exceeds maxFailures
 			// shortcut the waiting rpc.
 			errCount := it.recordError(err, isClientError)
