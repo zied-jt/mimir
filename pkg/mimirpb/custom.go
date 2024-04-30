@@ -10,6 +10,8 @@ import (
 	"github.com/prometheus/prometheus/model/histogram"
 )
 
+const NativeHistogramBucketCountLabel = "__nh_bucket_count__"
+
 // MinTimestamp returns the minimum timestamp (milliseconds) among all series
 // in the WriteRequest. Returns math.MaxInt64 if the request is empty.
 func (m *WriteRequest) MinTimestamp() int64 {

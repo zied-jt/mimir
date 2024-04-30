@@ -2054,6 +2054,34 @@ func (cm *labelValuesCardinalityConcurrentMap) toResponse(isMultiZone bool, repl
 // ActiveSeries queries the ingester replication set for active series matching
 // the given selector. It combines and deduplicates the results.
 func (d *Distributor) ActiveSeries(ctx context.Context, matchers []*labels.Matcher) ([]labels.Labels, error) {
+	res, err := d.deduplicateActiveSeries(ctx, matchers, false)
+	if err != nil {
+		return nil, err
+	}
+
+	deduplicatedSeries, fetchedSeries := res.result()
+
+	reqStats := stats.FromContext(ctx)
+	reqStats.AddFetchedSeries(fetchedSeries)
+
+	return deduplicatedSeries, nil
+}
+
+func (d *Distributor) ActiveNativeHistogramMetrics(ctx context.Context, matchers []*labels.Matcher) (*cardinality.ActiveNativeHistogramMetricsResponse, error) {
+	res, err := d.deduplicateActiveSeries(ctx, matchers, true)
+	if err != nil {
+		return nil, err
+	}
+
+	metrics, fetchedSeries := res.metricResult()
+
+	reqStats := stats.FromContext(ctx)
+	reqStats.AddFetchedSeries(fetchedSeries)
+
+	return &cardinality.ActiveNativeHistogramMetricsResponse{Data: metrics}, nil
+}
+
+func (d *Distributor) deduplicateActiveSeries(ctx context.Context, matchers []*labels.Matcher, nativeHistograms bool) (*activeSeriesResponse, error) {
 	replicationSets, err := d.getIngesterReplicationSetsForQuery(ctx)
 	if err != nil {
 		return nil, err
@@ -2069,6 +2097,9 @@ func (d *Distributor) ActiveSeries(ctx context.Context, matchers []*labels.Match
 	if err != nil {
 		return nil, err
 	}
+	if nativeHistograms {
+		req.Type = ingester_client.NATIVE_HISTOGRAM_SERIES
+	}
 
 	tenantID, err := tenant.TenantID(ctx)
 	if err != nil {
@@ -2076,10 +2107,13 @@ func (d *Distributor) ActiveSeries(ctx context.Context, matchers []*labels.Match
 	}
 
 	maxResponseSize := math.MaxInt
-	if limit := d.limits.ActiveSeriesResultsMaxSizeBytes(tenantID); limit > 0 {
-		maxResponseSize = limit
+	if !nativeHistograms {
+		// We are going to return metrics level information, this limit doesn't make much sense in that case
+		if limit := d.limits.ActiveSeriesResultsMaxSizeBytes(tenantID); limit > 0 {
+			maxResponseSize = limit
+		}
 	}
-	res := newActiveSeriesResponse(d.hashCollisionCount, maxResponseSize)
+	res := newActiveSeriesResponse(d.hashCollisionCount, maxResponseSize, nativeHistograms)
 
 	ingesterQuery := func(ctx context.Context, client ingester_client.IngesterClient) (any, error) {
 		// This function is invoked purely for its side effects on the captured
@@ -2134,12 +2168,7 @@ func (d *Distributor) ActiveSeries(ctx context.Context, matchers []*labels.Match
 		return nil, err
 	}
 
-	deduplicatedSeries := res.result()
-
-	reqStats := stats.FromContext(ctx)
-	reqStats.AddFetchedSeries(uint64(len(deduplicatedSeries)))
-
-	return deduplicatedSeries, nil
+	return res, nil
 }
 
 type entry struct {
@@ -2149,6 +2178,7 @@ type entry struct {
 
 // activeSeriesResponse is a helper to merge/deduplicate ActiveSeries responses from ingesters.
 type activeSeriesResponse struct {
+	ignoreBucketCount  bool
 	m                  sync.Mutex
 	series             map[uint64]entry
 	builder            labels.ScratchBuilder
@@ -2160,8 +2190,9 @@ type activeSeriesResponse struct {
 	maxSize int
 }
 
-func newActiveSeriesResponse(hashCollisionCount prometheus.Counter, maxSize int) *activeSeriesResponse {
+func newActiveSeriesResponse(hashCollisionCount prometheus.Counter, maxSize int, ignoreBucketCount bool) *activeSeriesResponse {
 	return &activeSeriesResponse{
+		ignoreBucketCount:  ignoreBucketCount,
 		series:             map[uint64]entry{},
 		builder:            labels.NewScratchBuilder(40),
 		hashCollisionCount: hashCollisionCount,
@@ -2178,7 +2209,13 @@ func (r *activeSeriesResponse) add(series []*mimirpb.Metric) error {
 
 	for _, metric := range series {
 		mimirpb.FromLabelAdaptersOverwriteLabels(&r.builder, metric.Labels, &r.lbls)
-		lblHash := r.lbls.Hash()
+		lblHash := uint64(0)
+		if r.ignoreBucketCount {
+			// Do not take the bucket count into account when deduplicating native histograms.
+			lblHash, r.buf = r.lbls.HashWithoutLabels(r.buf, mimirpb.NativeHistogramBucketCountLabel)
+		} else {
+			lblHash = r.lbls.Hash()
+		}
 		if e, ok := r.series[lblHash]; !ok {
 			l := r.lbls.Copy()
 
@@ -2193,12 +2230,23 @@ func (r *activeSeriesResponse) add(series []*mimirpb.Metric) error {
 			// A series with this hash is already present in the result set, we need to
 			// detect potential hash collisions by comparing the labels of the candidate to
 			// the labels in the result set and add the candidate if it's not present.
-			present := labels.Equal(e.first, r.lbls)
-			for _, lbls := range e.collisions {
-				if present {
-					break
+			present := false
+			if r.ignoreBucketCount {
+				present = LabelsEqualWithout(e.first, r.lbls, mimirpb.NativeHistogramBucketCountLabel)
+				for _, lbls := range e.collisions {
+					if present {
+						break
+					}
+					present = LabelsEqualWithout(lbls, r.lbls, mimirpb.NativeHistogramBucketCountLabel)
 				}
-				present = labels.Equal(lbls, r.lbls)
+			} else {
+				present = labels.Equal(e.first, r.lbls)
+				for _, lbls := range e.collisions {
+					if present {
+						break
+					}
+					present = labels.Equal(lbls, r.lbls)
+				}
 			}
 
 			if !present {
@@ -2220,7 +2268,20 @@ func (r *activeSeriesResponse) add(series []*mimirpb.Metric) error {
 	return nil
 }
 
-func (r *activeSeriesResponse) result() []labels.Labels {
+// LabelsEqualWithout returns whether the two label sets are equal, excluding the label with the given name.
+func LabelsEqualWithout(ls, o labels.Labels, without string) bool {
+	if len(ls) != len(o) {
+		return false
+	}
+	for i, l := range ls {
+		if l.Name != without && l != o[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *activeSeriesResponse) result() ([]labels.Labels, uint64) {
 	r.m.Lock()
 	defer r.m.Unlock()
 
@@ -2229,7 +2290,73 @@ func (r *activeSeriesResponse) result() []labels.Labels {
 		result = append(result, series.first)
 		result = append(result, series.collisions...)
 	}
-	return result
+	return result, uint64(len(result))
+}
+
+type metricBucketCounts struct {
+	SeriesCount    uint64
+	BucketCount    uint64
+	MaxBucketCount uint64
+	MinBucketCount uint64
+}
+
+// Aggregate native histogram bucket counts on metric level.
+func (r *activeSeriesResponse) metricResult() ([]cardinality.ActiveMetricWithBucketCount, uint64) {
+	metrics, fetchedSeries := r.getMetricCounts()
+	result := make([]cardinality.ActiveMetricWithBucketCount, 0, len(metrics))
+	for name, metric := range metrics {
+		result = append(result, cardinality.ActiveMetricWithBucketCount{
+			Metric:         name,
+			SeriesCount:    metric.SeriesCount,
+			BucketCount:    metric.BucketCount,
+			MaxBucketCount: metric.MaxBucketCount,
+			MinBucketCount: metric.MinBucketCount,
+			AvgBucketCount: float64(metric.BucketCount) / float64(metric.SeriesCount),
+		})
+	}
+	return result, fetchedSeries
+}
+
+func (r *activeSeriesResponse) getMetricCounts() (map[string]*metricBucketCounts, uint64) {
+	r.m.Lock()
+	defer r.m.Unlock()
+
+	fetchedSeries := uint64(0)
+	metrics := map[string]*metricBucketCounts{}
+	for _, series := range r.series {
+		fetchedSeries += 1 + uint64(len(series.collisions))
+		updateMetricCounts(metrics, series.first)
+		for _, collision := range series.collisions {
+			updateMetricCounts(metrics, collision)
+		}
+	}
+	return metrics, fetchedSeries
+}
+
+func updateMetricCounts(metrics map[string]*metricBucketCounts, series labels.Labels) {
+	bucketCount := uint64(0)
+	bucketValue := series.Get(mimirpb.NativeHistogramBucketCountLabel)
+	if bucketValue != "" {
+		bc, _ := strconv.Atoi(bucketValue)
+		bucketCount = uint64(bc)
+	}
+	if m, ok := metrics[series.Get(model.MetricNameLabel)]; ok {
+		m.SeriesCount++
+		m.BucketCount += bucketCount
+		if m.MaxBucketCount < bucketCount {
+			m.MaxBucketCount = bucketCount
+		}
+		if m.MinBucketCount > bucketCount {
+			m.MinBucketCount = bucketCount
+		}
+	} else {
+		metrics[series.Get(model.MetricNameLabel)] = &metricBucketCounts{
+			SeriesCount:    1,
+			BucketCount:    bucketCount,
+			MaxBucketCount: bucketCount,
+			MinBucketCount: bucketCount,
+		}
+	}
 }
 
 // approximateFromZones computes a zonal value while factoring in replication.
